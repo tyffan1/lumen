@@ -8,11 +8,13 @@ mod foreground;
 mod idle;
 mod fullscreen;
 mod process_info;
+mod icon;
 
 pub use foreground::{ForegroundTracker, ForegroundEvent};
 pub use idle::IdleWatcher;
 pub use fullscreen::is_exclusive_fullscreen;
 pub use process_info::ProcessInfo;
+pub use icon::{AppIcon, extract_exe_icon};
 
 use std::sync::mpsc::Receiver;
 

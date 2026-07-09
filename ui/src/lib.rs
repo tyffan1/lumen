@@ -3,6 +3,7 @@ mod render;
 
 pub use chrome::HitZone;
 pub use render::AppUsage;
+pub use render::HoveredTitleButton;
 
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
@@ -13,7 +14,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowId};
 
 /// Пользовательское событие для winit EventLoopProxy — пробуждает event loop
 /// без создания окна, когда агрегатор обновил данные.
@@ -43,6 +44,8 @@ pub struct LumenApp {
     window_focused: bool,
     /// true, пока окно видимо (не скрыто в трей).
     window_visible: bool,
+    /// Какая titlebar-кнопка под курсором (для hover-эффекта).
+    hovered_button: Option<HitZone>,
 }
 
 impl LumenApp {
@@ -59,6 +62,7 @@ impl LumenApp {
             shared_usage,
             window_focused: false,
             window_visible: false,
+            hovered_button: None,
         }
     }
 
@@ -110,6 +114,29 @@ impl ApplicationHandler<UserEvent> for LumenApp {
             .with_min_inner_size(winit::dpi::LogicalSize::new(280.0, 200.0));
 
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+
+        // Windows 11+: скруглённые углы окна. На Win10 тихо ignored.
+        #[cfg(windows)]
+        {
+            use std::ffi::c_void;
+            use windows::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+            if let Ok(handle) = winit::raw_window_handle::HasWindowHandle::window_handle(&window) {
+                use windows::Win32::Foundation::HWND;
+                if let winit::raw_window_handle::RawWindowHandle::Win32(w32) = handle.as_ref() {
+                    let hwnd = HWND(w32.hwnd.get() as *mut c_void);
+                    let pref: u32 = 2;
+                    unsafe {
+                        let _ = DwmSetWindowAttribute(
+                            hwnd,
+                            windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(33),
+                            &pref as *const _ as *const c_void,
+                            std::mem::size_of::<u32>() as u32,
+                        );
+                    }
+                }
+            }
+        }
+
         let context = Context::new(window.clone()).expect("softbuffer context");
         let surface = Surface::new(&context, window.clone()).expect("softbuffer surface");
 
@@ -160,12 +187,12 @@ impl ApplicationHandler<UserEvent> for LumenApp {
             }
 
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                let Some(window) = &self.window else { return };
+                let (cx, cy) = self.last_cursor_pos;
+                let size = window.inner_size();
                 match state {
                     ElementState::Pressed => {
-                        let Some(window) = &self.window else { return };
-                        let (cx, cy) = self.last_cursor_pos;
-                        let size = window.inner_size();
-                        match chrome::hit_test(cx, cy, size.width as f64) {
+                        match chrome::hit_test(cx, cy, size.width as f64, size.height as f64) {
                             chrome::HitZone::CloseButton => {
                                 self.window_visible = false;
                                 window.set_visible(false);
@@ -174,7 +201,15 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             chrome::HitZone::MinimizeButton => {
                                 window.set_minimized(true);
                             }
-                            _ => self.start_drag_if_on_titlebar(),
+                            chrome::HitZone::ResizeLeft => { let _ = window.drag_resize_window(ResizeDirection::West); }
+                            chrome::HitZone::ResizeRight => { let _ = window.drag_resize_window(ResizeDirection::East); }
+                            chrome::HitZone::ResizeTop => { let _ = window.drag_resize_window(ResizeDirection::North); }
+                            chrome::HitZone::ResizeBottom => { let _ = window.drag_resize_window(ResizeDirection::South); }
+                            chrome::HitZone::ResizeTopLeft => { let _ = window.drag_resize_window(ResizeDirection::NorthWest); }
+                            chrome::HitZone::ResizeTopRight => { let _ = window.drag_resize_window(ResizeDirection::NorthEast); }
+                            chrome::HitZone::ResizeBottomLeft => { let _ = window.drag_resize_window(ResizeDirection::SouthWest); }
+                            chrome::HitZone::ResizeBottomRight => { let _ = window.drag_resize_window(ResizeDirection::SouthEast); }
+                            _ => self.start_drag_if_on_titlebar(size),
                         }
                     }
                     ElementState::Released => self.dragging = false,
@@ -184,6 +219,33 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                 self.last_cursor_pos = (position.x, position.y);
                 if self.dragging {
                     self.drag_window(position.x, position.y);
+                }
+                if let Some(window) = &self.window {
+                    let size = window.inner_size();
+                    let zone = chrome::hit_test(position.x, position.y, size.width as f64, size.height as f64);
+                    let new_hover = match zone {
+                        chrome::HitZone::CloseButton | chrome::HitZone::MinimizeButton => Some(zone),
+                        _ => None,
+                    };
+                    if new_hover != self.hovered_button {
+                        self.hovered_button = new_hover;
+                        self.dirty = true;
+                    }
+                    let cursor = match zone {
+                        chrome::HitZone::ResizeLeft | chrome::HitZone::ResizeRight => CursorIcon::EwResize,
+                        chrome::HitZone::ResizeTop | chrome::HitZone::ResizeBottom => CursorIcon::NsResize,
+                        chrome::HitZone::ResizeTopLeft | chrome::HitZone::ResizeBottomRight => CursorIcon::NwseResize,
+                        chrome::HitZone::ResizeTopRight | chrome::HitZone::ResizeBottomLeft => CursorIcon::NeswResize,
+                        _ => CursorIcon::Default,
+                    };
+                    window.set_cursor(cursor);
+                }
+            }
+
+            WindowEvent::CursorLeft { .. } => {
+                if self.hovered_button.is_some() {
+                    self.hovered_button = None;
+                    self.dirty = true;
                 }
             }
 
@@ -217,15 +279,14 @@ impl ApplicationHandler<UserEvent> for LumenApp {
 }
 
 impl LumenApp {
-    fn start_drag_if_on_titlebar(&mut self) {
+    fn start_drag_if_on_titlebar(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         let window = match &self.window {
             Some(w) => w,
             None => return,
         };
 
         let (cx, cy) = self.last_cursor_pos;
-        let size = window.inner_size();
-        let zone = chrome::hit_test(cx, cy, size.width as f64);
+        let zone = chrome::hit_test(cx, cy, size.width as f64, size.height as f64);
 
         if zone != chrome::HitZone::Titlebar {
             return;
@@ -280,7 +341,12 @@ impl LumenApp {
 
         let usage = self.shared_usage.lock().unwrap().clone();
 
-        let pixmap = render::draw_frame(width, height, &render::Theme::default(), &usage);
+        let hover = match self.hovered_button {
+            Some(chrome::HitZone::CloseButton) => render::HoveredTitleButton::Close,
+            Some(chrome::HitZone::MinimizeButton) => render::HoveredTitleButton::Minimize,
+            _ => render::HoveredTitleButton::None,
+        };
+        let pixmap = render::draw_frame(width, height, &render::Theme::default(), &usage, hover);
         render::blit_to_softbuffer(&pixmap, &mut *buffer);
         let _ = buffer.present();
     }

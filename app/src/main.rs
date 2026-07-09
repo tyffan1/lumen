@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lumen_core::{spawn_tracker, TrackerEvent};
+use lumen_core::{extract_exe_icon, spawn_tracker, AppIcon, TrackerEvent};
 use lumen_storage::{Session, Storage};
 use lumen_ui::{AppUsage, UserEvent};
 use tray_icon::{Icon, TrayIconBuilder, menu::{Menu, MenuEvent, MenuItem}};
@@ -72,6 +72,7 @@ fn run_aggregator(
     let mut is_idle = false;
     let mut last_foreground: Option<lumen_core::ProcessInfo> = None;
     let mut totals: HashMap<String, u64> = HashMap::new();
+    let mut icon_cache: HashMap<String, AppIcon> = HashMap::new();
     let mut last_flush = Instant::now();
     let mut last_ui_update = Instant::now();
 
@@ -91,6 +92,11 @@ fn run_aggregator(
             match event {
                 TrackerEvent::WindowChanged(info) => {
                     last_foreground = Some(info.clone());
+                    if !info.exe_path.is_empty() && !icon_cache.contains_key(&info.exe_name) {
+                        if let Some(icon) = extract_exe_icon(&info.exe_path) {
+                            icon_cache.insert(info.exe_name.clone(), icon);
+                        }
+                    }
                     if !is_idle {
                         if let Some((prev_info, started_at, _was_fullscreen)) = current.take() {
                             let dur = (Utc::now() - started_at).num_seconds().max(0) as u64;
@@ -149,7 +155,7 @@ fn run_aggregator(
         }
 
         if send_update {
-            build_and_send(&shared_usage, &proxy, &totals, &current);
+            build_and_send(&shared_usage, &proxy, &totals, &current, &icon_cache);
             send_update = false;
         }
 
@@ -159,7 +165,7 @@ fn run_aggregator(
         }
 
         if last_ui_update.elapsed() >= UI_UPDATE_INTERVAL {
-            update_shared_usage(&shared_usage, &totals, &current);
+            update_shared_usage(&shared_usage, &totals, &current, &icon_cache);
             last_ui_update = Instant::now();
         }
     }
@@ -181,8 +187,9 @@ fn update_shared_usage(
     shared_usage: &Arc<Mutex<Vec<AppUsage>>>,
     totals: &HashMap<String, u64>,
     current: &Option<(lumen_core::ProcessInfo, chrono::DateTime<chrono::Utc>, bool)>,
+    icon_cache: &HashMap<String, AppIcon>,
 ) {
-    *shared_usage.lock().unwrap() = build_usage_list(totals, current);
+    *shared_usage.lock().unwrap() = build_usage_list(totals, current, icon_cache);
 }
 
 /// Строит список и шлёт DataUpdated (для значимых событий).
@@ -191,29 +198,45 @@ fn build_and_send(
     proxy: &winit::event_loop::EventLoopProxy<UserEvent>,
     totals: &HashMap<String, u64>,
     current: &Option<(lumen_core::ProcessInfo, chrono::DateTime<chrono::Utc>, bool)>,
+    icon_cache: &HashMap<String, AppIcon>,
 ) {
-    *shared_usage.lock().unwrap() = build_usage_list(totals, current);
+    *shared_usage.lock().unwrap() = build_usage_list(totals, current, icon_cache);
     let _ = proxy.send_event(UserEvent::DataUpdated);
 }
 
 fn build_usage_list(
     totals: &HashMap<String, u64>,
     current: &Option<(lumen_core::ProcessInfo, chrono::DateTime<chrono::Utc>, bool)>,
+    icon_cache: &HashMap<String, AppIcon>,
 ) -> Vec<AppUsage> {
     use chrono::Utc;
 
+    let attach_icon = |name: &str| -> (Option<Vec<u8>>, u32, u32) {
+        icon_cache
+            .get(name)
+            .map(|icon| (Some(icon.rgba.clone()), icon.width, icon.height))
+            .unwrap_or((None, 0, 0))
+    };
+
     let mut usage: Vec<AppUsage> = totals
         .iter()
-        .map(|(name, secs)| AppUsage {
-            name: name.clone(),
-            duration_secs: *secs,
-            is_active: false,
+        .map(|(name, secs)| {
+            let (icon_rgba, icon_w, icon_h) = attach_icon(name);
+            AppUsage {
+                name: name.clone(),
+                duration_secs: *secs,
+                is_active: false,
+                icon_rgba,
+                icon_w,
+                icon_h,
+            }
         })
         .collect();
 
     if let Some((info, started_at, _)) = current {
         let extra = (Utc::now() - *started_at).num_seconds().max(0) as u64;
         let active_secs = totals.get(&info.exe_name).copied().unwrap_or(0) + extra;
+        let (icon_rgba, icon_w, icon_h) = attach_icon(&info.exe_name);
         if let Some(existing) = usage.iter_mut().find(|a| a.name == info.exe_name) {
             existing.duration_secs = active_secs;
             existing.is_active = true;
@@ -222,6 +245,9 @@ fn build_usage_list(
                 name: info.exe_name.clone(),
                 duration_secs: active_secs,
                 is_active: true,
+                icon_rgba,
+                icon_w,
+                icon_h,
             });
         }
     }

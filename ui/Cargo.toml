@@ -9,3 +9,4 @@ softbuffer.workspace = true
 tiny-skia.workspace = true
 fontdue.workspace = true
 anyhow.workspace = true
+windows.workspace = true

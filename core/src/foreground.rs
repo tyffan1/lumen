@@ -8,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 
-use crate::process_info::exe_name_by_pid;
+use crate::process_info::{exe_full_path_by_pid, exe_name_by_pid};
 use crate::{ProcessInfo, TrackerEvent};
 
 thread_local! {
@@ -92,9 +92,10 @@ fn emit_window(tx: &Sender<TrackerEvent>, hwnd: HWND) {
     }
 
     let exe_name = exe_name_by_pid(pid).unwrap_or_else(|| "unknown".to_string());
+    let exe_path = exe_full_path_by_pid(pid).unwrap_or_default();
     let window_title = window_title(hwnd);
 
-    let info = ProcessInfo { pid, exe_name, window_title };
+    let info = ProcessInfo { pid, exe_name, exe_path, window_title };
 
     if crate::fullscreen::is_exclusive_fullscreen(hwnd) {
         let _ = tx.send(TrackerEvent::FullscreenEntered(info.clone()));

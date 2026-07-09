@@ -9,6 +9,7 @@ use windows::Win32::System::Threading::{
 pub struct ProcessInfo {
     pub pid: u32,
     pub exe_name: String,
+    pub exe_path: String,
     pub window_title: String,
 }
 
@@ -21,13 +22,7 @@ pub fn lower_own_priority() {
     }
 }
 
-/// Достаёт имя exe по pid через QueryFullProcessImageNameW.
-/// Требует только PROCESS_QUERY_LIMITED_INFORMATION —
-/// минимально необходимые права, без лишних вопросов от антивирусов/UAC.
-///
-/// GetModuleBaseNameW не используется — он часто возвращает 0 для
-/// многих процессов при передаче hmodule = None, что давало fallback "unknown".
-pub fn exe_name_by_pid(pid: u32) -> Option<String> {
+fn query_full_path(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
 
@@ -48,13 +43,22 @@ pub fn exe_name_by_pid(pid: u32) -> Option<String> {
         }
 
         let name_len = buf[..size as usize].iter().position(|&c| c == 0).unwrap_or(size as usize);
-        let full_path = String::from_utf16_lossy(&buf[..name_len]);
+        Some(String::from_utf16_lossy(&buf[..name_len]))
+    }
+}
 
-        let file_name = Path::new(&full_path)
+/// Возвращает полный путь к .exe процесса по PID.
+pub fn exe_full_path_by_pid(pid: u32) -> Option<String> {
+    query_full_path(pid)
+}
+
+/// Возвращает только имя файла .exe (без пути) по PID.
+pub fn exe_name_by_pid(pid: u32) -> Option<String> {
+    let full_path = query_full_path(pid)?;
+    Some(
+        Path::new(&full_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or(full_path);
-
-        Some(file_name)
-    }
+            .unwrap_or(full_path),
+    )
 }
