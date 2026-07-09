@@ -1,0 +1,10 @@
+[package]
+name = "lumen-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+windows.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true

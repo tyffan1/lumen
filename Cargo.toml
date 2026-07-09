@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "storage",
+    "ui",
+    "app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["saven"]
+
+[workspace.dependencies]
+lumen-core = { path = "core" }
+lumen-storage = { path = "storage" }
+lumen-ui = { path = "ui" }
+
+winit = "0.30"
+softbuffer = "0.4"
+tiny-skia = "0.11"
+fontdue = "0.9"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tray-icon = "0.19"
+anyhow = "1"
+thiserror = "1"
+dirs = "5"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+] }
+
+# Профиль для минимального рантайм-оверхеда
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

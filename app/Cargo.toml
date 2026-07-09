@@ -1,0 +1,23 @@
+[package]
+name = "lumen-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+
+# Убираем консольное окно в релизе (Windows subsystem)
+[package.metadata.winres]
+OriginalFilename = "lumen.exe"
+
+[dependencies]
+lumen-core.workspace = true
+lumen-storage.workspace = true
+lumen-ui.workspace = true
+tray-icon.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+winit.workspace = true
+image.workspace = true

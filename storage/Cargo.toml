@@ -1,0 +1,9 @@
+[package]
+name = "lumen-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+chrono.workspace = true
+anyhow.workspace = true

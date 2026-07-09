@@ -1,0 +1,11 @@
+[package]
+name = "lumen-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+winit.workspace = true
+softbuffer.workspace = true
+tiny-skia.workspace = true
+fontdue.workspace = true
+anyhow.workspace = true
