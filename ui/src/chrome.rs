@@ -3,6 +3,9 @@ pub enum HitZone {
     Titlebar,
     CloseButton,
     MinimizeButton,
+    SettingsButton,
+    SearchField,
+    SearchClear,
     ResizeLeft,
     ResizeRight,
     ResizeTop,
@@ -17,17 +20,23 @@ pub enum HitZone {
 const TITLEBAR_HEIGHT: f64 = 32.0;
 const BUTTON_SIZE: f64 = 32.0;
 const RESIZE_BORDER: f64 = 6.0;
+const SEARCH_HEIGHT: f64 = 28.0;
+const PADDING_X: f64 = 16.0;
+const SEARCH_CLEAR_W: f64 = 24.0;
 
 pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64) -> HitZone {
-    // Приоритет: кнопки titlebar → resize края → drag / client
+    // Приоритет: кнопки titlebar → resize края → поиск → drag / client
 
-    // 1. Кнопки на titlebar (имеют приоритет над resize-углами сверху)
+    // 1. Кнопки на titlebar (имеют приоритет над resize-углами сверху). Три кнопки по 32px.
     if y <= TITLEBAR_HEIGHT {
         if x >= window_width - BUTTON_SIZE {
             return HitZone::CloseButton;
         }
         if x >= window_width - BUTTON_SIZE * 2.0 {
             return HitZone::MinimizeButton;
+        }
+        if x >= window_width - BUTTON_SIZE * 3.0 {
+            return HitZone::SettingsButton;
         }
     }
 
@@ -62,7 +71,15 @@ pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64) -> HitZon
         return HitZone::ResizeTop;
     }
 
-    // 3. Drag titlebar (между кнопками и левым краем, не в resize-зоне)
+    // 3. Поле поиска (под titlebar, над списком). Крестик очистки справа.
+    if y > TITLEBAR_HEIGHT && y <= TITLEBAR_HEIGHT + SEARCH_HEIGHT {
+        if x >= window_width - PADDING_X - SEARCH_CLEAR_W {
+            return HitZone::SearchClear;
+        }
+        return HitZone::SearchField;
+    }
+
+    // 4. Drag titlebar (между кнопками и левым краем, не в resize-зоне)
     if y <= TITLEBAR_HEIGHT {
         return HitZone::Titlebar;
     }

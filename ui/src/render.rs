@@ -3,10 +3,17 @@ use std::sync::OnceLock;
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppView {
+    List,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HoveredTitleButton {
     None,
     Close,
     Minimize,
+    Settings,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +40,7 @@ pub struct Theme {
     pub separator: Color,
     pub active_indicator: Color,
     pub placeholder_icon: Color,
+    pub hover_bg: Color,
 }
 
 impl Default for Theme {
@@ -45,21 +53,24 @@ impl Default for Theme {
             separator: Color::from_rgba8(38, 38, 42, 255),
             active_indicator: Color::from_rgba8(130, 130, 210, 255),
             placeholder_icon: Color::from_rgba8(48, 48, 53, 255),
+            hover_bg: Color::from_rgba8(255, 255, 255, 12),
         }
     }
 }
 
 const TITLEBAR_HEIGHT: f32 = 32.0;
-const ROW_HEIGHT: f32 = 44.0;
+const SEARCH_HEIGHT: f32 = 28.0;
+const LIST_TOP: f32 = TITLEBAR_HEIGHT + SEARCH_HEIGHT + 8.0;
+const ROW_HEIGHT: f32 = 56.0;
 const FONT_SIZE: f32 = 14.0;
 const FONT_SIZE_DUR: f32 = 12.0;
 const BAR_HEIGHT: f32 = 2.0;
 const PADDING_X: f32 = 16.0;
-const ICON_SIZE: f32 = 16.0;
+const ICON_SIZE: f32 = 20.0;
 const ICON_GAP: f32 = 8.0;
 const INDICATOR_W: f32 = 2.0;
 
-pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], button_hover: HoveredTitleButton) -> Pixmap {
+pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], button_hover: HoveredTitleButton, hovered_row: Option<usize>, hover_intensity: f32, search_query: &str, search_focused: bool, cursor_visible: bool, view: AppView, autostart: bool, show_seconds: bool, start_minimized: bool, idle_threshold_mins: u32, confirm_clear: bool) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).expect("pixmap alloc");
 
     let mut paint_bg = Paint::default();
@@ -73,6 +84,17 @@ pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], bu
 
     draw_titlebar_buttons(&mut pixmap, width, theme, button_hover);
 
+    let font_reg = font();
+    let font_bld = font_bold();
+
+    // суммарное время слева в titlebar
+    if let Some(f) = font_reg {
+        let total_secs: u64 = usage.iter().map(|a| a.duration_secs).sum();
+        let base = text_baseline(0.0, TITLEBAR_HEIGHT, f, FONT_SIZE_DUR)
+            .unwrap_or(TITLEBAR_HEIGHT / 2.0 + FONT_SIZE_DUR * 0.35);
+        draw_text(&mut pixmap, &fmt_duration(total_secs, false), PADDING_X, base, f, FONT_SIZE_DUR, theme.text_dim);
+    }
+
     let mut paint_sep = Paint::default();
     paint_sep.set_color(theme.separator);
     pixmap.fill_rect(
@@ -82,11 +104,86 @@ pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], bu
         None,
     );
 
-    let font = font();
-    let mut y = TITLEBAR_HEIGHT + 8.0;
+    match view {
+        AppView::List => draw_list_content(&mut pixmap, width, height, theme, usage, hovered_row, hover_intensity, font_reg, font_bld, search_query, search_focused, cursor_visible, show_seconds),
+        AppView::Settings => draw_settings(&mut pixmap, width, height, theme, font_reg, autostart, show_seconds, start_minimized, idle_threshold_mins, hovered_row, hover_intensity, confirm_clear),
+    }
+
+    pixmap
+}
+
+fn draw_list_content(pixmap: &mut Pixmap, width: u32, height: u32, theme: &Theme, usage: &[AppUsage], hovered_row: Option<usize>, hover_intensity: f32, font_reg: Option<&fontdue::Font>, font_bld: Option<&fontdue::Font>, search_query: &str, search_focused: bool, cursor_visible: bool, show_seconds: bool) {
+    // поле поиска
+    let search_y = TITLEBAR_HEIGHT;
+    if let Some(f) = font_reg {
+        let base = text_baseline(search_y, SEARCH_HEIGHT, f, FONT_SIZE_DUR)
+            .unwrap_or(search_y + SEARCH_HEIGHT / 2.0 + FONT_SIZE_DUR * 0.35);
+        let display = if search_query.is_empty() && !search_focused {
+            "Search..."
+        } else {
+            search_query
+        };
+        let color = if search_query.is_empty() && !search_focused {
+            theme.text_dim
+        } else {
+            theme.text
+        };
+        draw_text(pixmap, display, PADDING_X, base, f, FONT_SIZE_DUR, color);
+
+        // крестик очистки ×
+        if !search_query.is_empty() {
+            let clear_cx = (width as f32) - PADDING_X - 10.0;
+            let clear_cy = search_y + SEARCH_HEIGHT / 2.0;
+            let arm = 3.0;
+            let mut path = tiny_skia::PathBuilder::new();
+            path.move_to(clear_cx - arm, clear_cy - arm);
+            path.line_to(clear_cx + arm, clear_cy + arm);
+            path.move_to(clear_cx + arm, clear_cy - arm);
+            path.line_to(clear_cx - arm, clear_cy + arm);
+            if let Some(p) = path.finish() {
+                let mut stroke = tiny_skia::Stroke::default();
+                stroke.width = 1.0;
+                stroke.line_cap = tiny_skia::LineCap::Round;
+                let mut paint = Paint::default();
+                paint.set_color(theme.text_dim);
+                pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+
+        // мигающий курсор
+        if search_focused && cursor_visible {
+            let text_w = measure_text(search_query, f, FONT_SIZE_DUR);
+            let cursor_x = PADDING_X + text_w + 1.0;
+            let cursor_y0 = base - 8.0;
+            let cursor_y1 = base + 2.0;
+            let mut path = tiny_skia::PathBuilder::new();
+            path.move_to(cursor_x, cursor_y0);
+            path.line_to(cursor_x, cursor_y1);
+            if let Some(p) = path.finish() {
+                let mut stroke = tiny_skia::Stroke::default();
+                stroke.width = 1.0;
+                let mut paint = Paint::default();
+                paint.set_color(theme.text);
+                pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+    }
+
+    // нижняя линия поля поиска
+    let underline_y = TITLEBAR_HEIGHT + SEARCH_HEIGHT - 1.0;
+    let mut pu = Paint::default();
+    pu.set_color(if search_focused { theme.accent } else { theme.separator });
+    pixmap.fill_rect(
+        Rect::from_xywh(PADDING_X, underline_y, (width as f32) - PADDING_X * 2.0, 1.0).unwrap(),
+        &pu,
+        Transform::identity(),
+        None,
+    );
+
+    let mut y = LIST_TOP;
     let max_dur = usage.iter().map(|a| a.duration_secs).max().unwrap_or(0);
 
-    for app in usage {
+    for (i, app) in usage.iter().enumerate() {
         if y + ROW_HEIGHT > height as f32 {
             break;
         }
@@ -102,11 +199,30 @@ pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], bu
             );
         }
 
+        // hover-подсветка строки
+        if Some(i) == hovered_row && hover_intensity > 0.0 {
+            let a = (theme.hover_bg.alpha() * hover_intensity * 255.0) as u8;
+            let mut hp = Paint::default();
+            hp.set_color(Color::from_rgba8(
+                (theme.hover_bg.red() * 255.0) as u8,
+                (theme.hover_bg.green() * 255.0) as u8,
+                (theme.hover_bg.blue() * 255.0) as u8,
+                a,
+            ));
+            hp.anti_alias = true;
+            pixmap.fill_rect(
+                Rect::from_xywh(0.0, y, width as f32, ROW_HEIGHT).unwrap(),
+                &hp,
+                Transform::identity(),
+                None,
+            );
+        }
+
         let icon_x = PADDING_X;
         let icon_y = y + (ROW_HEIGHT - ICON_SIZE) / 2.0;
         let icon_w = if let Some(ref rgba) = app.icon_rgba {
             blit_rgba(
-                &mut pixmap,
+                pixmap,
                 rgba.as_slice(),
                 app.icon_w,
                 app.icon_h,
@@ -117,24 +233,25 @@ pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], bu
             );
             ICON_SIZE
         } else {
-            draw_placeholder_icon(&mut pixmap, icon_x, icon_y, ICON_SIZE, theme.placeholder_icon);
+            draw_placeholder_icon(pixmap, icon_x, icon_y, ICON_SIZE, theme.placeholder_icon);
             ICON_SIZE
         };
 
         let name_x = icon_x + icon_w + ICON_GAP;
-        if let Some(f) = font {
+        let display_name = app.name.strip_suffix(".exe").unwrap_or(&app.name);
+        if let Some(f) = font_bld {
             let base = text_baseline(y, ROW_HEIGHT, f, FONT_SIZE)
                 .unwrap_or(y + ROW_HEIGHT / 2.0 + FONT_SIZE * 0.35);
-            draw_text(&mut pixmap, &app.name, name_x, base, f, FONT_SIZE, theme.text);
+            draw_text(pixmap, display_name, name_x, base, f, FONT_SIZE, theme.text);
         }
 
-        let dur_str = fmt_duration(app.duration_secs);
-        if let Some(f) = font {
+        let dur_str = fmt_duration(app.duration_secs, show_seconds);
+        if let Some(f) = font_reg {
             let text_w = measure_text(&dur_str, f, FONT_SIZE_DUR);
             let base = text_baseline(y, ROW_HEIGHT, f, FONT_SIZE_DUR)
                 .unwrap_or(y + ROW_HEIGHT / 2.0 + FONT_SIZE_DUR * 0.35);
             draw_text(
-                &mut pixmap,
+                pixmap,
                 &dur_str,
                 (width as f32 - text_w - PADDING_X).max(name_x + 8.0),
                 base,
@@ -167,14 +284,247 @@ pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], bu
 
         y += ROW_HEIGHT;
     }
+}
 
-    pixmap
+fn draw_settings(pixmap: &mut Pixmap, width: u32, _height: u32, theme: &Theme, font: Option<&fontdue::Font>, autostart: bool, show_seconds: bool, start_minimized: bool, idle_threshold_mins: u32, hovered_row: Option<usize>, hover_intensity: f32, confirm_clear: bool) {
+    if let Some(f) = font {
+        let hdr_y = SETTINGS_TOP;
+        draw_text(pixmap, "Settings", PADDING_X, hdr_y, f, FONT_SIZE, theme.text);
+
+        draw_settings_checkbox_row(pixmap, width, theme, f, 0, autostart, "Launch at startup", hovered_row, hover_intensity);
+        draw_settings_checkbox_row(pixmap, width, theme, f, 1, start_minimized, "Start minimized", hovered_row, hover_intensity);
+
+        draw_section_header(pixmap, width, theme, f, 2, "TRACKING");
+
+        draw_settings_idle_row(pixmap, width, theme, f, 2, idle_threshold_mins, hovered_row, hover_intensity);
+        draw_settings_checkbox_row(pixmap, width, theme, f, 3, show_seconds, "Show seconds", hovered_row, hover_intensity);
+
+        draw_section_header(pixmap, width, theme, f, 4, "DATA");
+
+        draw_settings_action_row(pixmap, width, theme, f, 4, "Clear history", hovered_row, hover_intensity, confirm_clear);
+        draw_settings_action_row(pixmap, width, theme, f, 5, "Open data folder", hovered_row, hover_intensity, false);
+
+        draw_section_separator(pixmap, width, theme, f, 6);
+        draw_settings_back_row(pixmap, width, theme, f, 6, hovered_row, hover_intensity);
+    }
+}
+
+const SETTINGS_TOP: f32 = 48.0;
+const HEADER_OFFSET: f32 = 32.0;
+const SRH: f32 = 56.0;
+const SECTION_GAP: f32 = 28.0;
+
+fn settings_gap_count(row: usize) -> usize {
+    match row {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        4 | 5 => 2,
+        _ => 3,
+    }
+}
+
+pub fn settings_row_y(row: usize) -> f32 {
+    SETTINGS_TOP + HEADER_OFFSET + row as f32 * SRH + settings_gap_count(row) as f32 * SECTION_GAP
+}
+
+pub fn settings_row_at(cy: f32) -> Option<usize> {
+    for row in 0..7 {
+        let y0 = settings_row_y(row);
+        if cy >= y0 && cy < y0 + SRH {
+            return Some(row);
+        }
+    }
+    None
+}
+
+pub fn settings_idle_button_positions(width: u32) -> (f32, f32) {
+    let right_x = width as f32 - PADDING_X;
+    let plus_cx = right_x - 14.0;
+    let minus_cx = plus_cx - 48.0;
+    (minus_cx, plus_cx)
+}
+
+pub fn settings_confirm_areas(width: u32) -> ((f32, f32), (f32, f32)) {
+    let mid = width as f32 / 2.0;
+    ( (mid - 20.0, mid + 10.0), (mid + 15.0, mid + 50.0) )
+}
+
+fn draw_row_hover(pixmap: &mut Pixmap, theme: &Theme, y: f32, intensity: f32) {
+    let a = (theme.hover_bg.alpha() * intensity * 255.0) as u8;
+    if a == 0 { return; }
+    let mut hp = Paint::default();
+    hp.set_color(Color::from_rgba8(
+        (theme.hover_bg.red() * 255.0) as u8,
+        (theme.hover_bg.green() * 255.0) as u8,
+        (theme.hover_bg.blue() * 255.0) as u8,
+        a,
+    ));
+    hp.anti_alias = true;
+    pixmap.fill_rect(
+        Rect::from_xywh(0.0, y, pixmap.width() as f32, SRH).unwrap(),
+        &hp,
+        Transform::identity(),
+        None,
+    );
+}
+
+fn draw_section_header(pixmap: &mut Pixmap, width: u32, theme: &Theme, font: &fontdue::Font, row: usize, label: &str) {
+    let gap_y = settings_row_y(row) - SECTION_GAP;
+    let sep_y = gap_y + SECTION_GAP / 2.0;
+    let mut paint = Paint::default();
+    paint.set_color(theme.separator);
+    pixmap.fill_rect(
+        Rect::from_xywh(PADDING_X, sep_y, (width as f32) - PADDING_X * 2.0, 1.0).unwrap(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
+    let base = text_baseline(gap_y, SECTION_GAP, font, FONT_SIZE_DUR)
+        .unwrap_or(gap_y + SECTION_GAP / 2.0 + FONT_SIZE_DUR * 0.35);
+    draw_text(pixmap, label, PADDING_X, base, font, FONT_SIZE_DUR, theme.text_dim);
+}
+
+fn draw_section_separator(pixmap: &mut Pixmap, width: u32, theme: &Theme, _font: &fontdue::Font, row: usize) {
+    let gap_y = settings_row_y(row) - SECTION_GAP;
+    let sep_y = gap_y + SECTION_GAP / 2.0;
+    let mut paint = Paint::default();
+    paint.set_color(theme.separator);
+    pixmap.fill_rect(
+        Rect::from_xywh(PADDING_X, sep_y, (width as f32) - PADDING_X * 2.0, 1.0).unwrap(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
+}
+
+fn draw_settings_checkbox_row(pixmap: &mut Pixmap, _width: u32, theme: &Theme, font: &fontdue::Font, row: usize, checked: bool, label: &str, hovered_row: Option<usize>, hover_intensity: f32) {
+    let y = settings_row_y(row);
+    if Some(row) == hovered_row && hover_intensity > 0.0 {
+        draw_row_hover(pixmap, theme, y, hover_intensity);
+    }
+
+    let cb_x = PADDING_X;
+    let cb_y = y + (SRH - 14.0) / 2.0;
+    let cb_size = 14.0;
+
+    let mut paint = Paint::default();
+    paint.set_color(theme.text_dim);
+    paint.anti_alias = true;
+    pixmap.fill_rect(
+        Rect::from_xywh(cb_x, cb_y, cb_size, cb_size).unwrap(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
+
+    if checked {
+        let inner = 2.0;
+        let mut fill = Paint::default();
+        fill.set_color(theme.accent);
+        fill.anti_alias = true;
+        pixmap.fill_rect(
+            Rect::from_xywh(cb_x + inner, cb_y + inner, cb_size - inner * 2.0, cb_size - inner * 2.0).unwrap(),
+            &fill,
+            Transform::identity(),
+            None,
+        );
+        let mut stroke = tiny_skia::Stroke::default();
+        stroke.width = 2.0;
+        stroke.line_cap = tiny_skia::LineCap::Round;
+        let cx = cb_x + 2.0;
+        let cy = cb_y + 2.0;
+        let mut path = tiny_skia::PathBuilder::new();
+        path.move_to(cx + 2.0, cy + 5.0);
+        path.line_to(cx + 5.0, cy + 8.0);
+        path.line_to(cx + 9.0, cy + 1.0);
+        if let Some(p) = path.finish() {
+            let mut gp = Paint::default();
+            gp.set_color(Color::from_rgba8(255, 255, 255, 255));
+            pixmap.stroke_path(&p, &gp, &stroke, Transform::identity(), None);
+        }
+    }
+
+    let text_base = text_baseline(y, SRH, font, FONT_SIZE)
+        .unwrap_or(y + SRH / 2.0 + FONT_SIZE * 0.35);
+    draw_text(pixmap, label, cb_x + cb_size + 10.0, text_base, font, FONT_SIZE, theme.text);
+}
+
+fn draw_settings_idle_row(pixmap: &mut Pixmap, width: u32, theme: &Theme, font: &fontdue::Font, row: usize, value: u32, hovered_row: Option<usize>, hover_intensity: f32) {
+    let y = settings_row_y(row);
+    if Some(row) == hovered_row && hover_intensity > 0.0 {
+        draw_row_hover(pixmap, theme, y, hover_intensity);
+    }
+
+    let text_base = text_baseline(y, SRH, font, FONT_SIZE)
+        .unwrap_or(y + SRH / 2.0 + FONT_SIZE * 0.35);
+    draw_text(pixmap, "Idle threshold", PADDING_X, text_base, font, FONT_SIZE, theme.text);
+
+    let w = width as f32;
+    let right_x = w - PADDING_X;
+    let plus_str = "+";
+    let minus_str = "−";
+    let btn_w = measure_text(plus_str, font, FONT_SIZE).max(measure_text(minus_str, font, FONT_SIZE));
+    let val_str = format!("{} min", value);
+    let val_w = measure_text(&val_str, font, FONT_SIZE);
+
+    let plus_x = right_x - btn_w;
+    let val_x = plus_x - 8.0 - val_w;
+    let minus_x = val_x - 8.0 - btn_w;
+
+    draw_text(pixmap, "+", plus_x, text_base, font, FONT_SIZE, theme.text);
+    draw_text(pixmap, &val_str, val_x, text_base, font, FONT_SIZE, theme.text);
+    draw_text(pixmap, "−", minus_x, text_base, font, FONT_SIZE, theme.text);
+}
+
+fn draw_settings_action_row(pixmap: &mut Pixmap, width: u32, theme: &Theme, font: &fontdue::Font, row: usize, label: &str, hovered_row: Option<usize>, hover_intensity: f32, confirm_clear: bool) {
+    let y = settings_row_y(row);
+    if Some(row) == hovered_row && hover_intensity > 0.0 {
+        draw_row_hover(pixmap, theme, y, hover_intensity);
+    }
+
+    let btn_x = PADDING_X;
+    let btn_y = y + 8.0;
+    let btn_w = (width as f32) - PADDING_X * 2.0;
+    let btn_h = SRH - 16.0;
+    let mut paint = Paint::default();
+    paint.set_color(Color::from_rgba8(255, 255, 255, 8));
+    paint.anti_alias = true;
+    pixmap.fill_rect(
+        Rect::from_xywh(btn_x, btn_y, btn_w, btn_h).unwrap(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
+
+    let text_base = text_baseline(y, SRH, font, FONT_SIZE)
+        .unwrap_or(y + SRH / 2.0 + FONT_SIZE * 0.35);
+
+    if confirm_clear && label == "Clear history" {
+        draw_text(pixmap, "Are you sure?", PADDING_X, text_base, font, FONT_SIZE, theme.text);
+        let mid = width as f32 / 2.0;
+        draw_text(pixmap, "[Yes]", mid - 20.0, text_base, font, FONT_SIZE, theme.accent);
+        draw_text(pixmap, "[Cancel]", mid + 15.0, text_base, font, FONT_SIZE, theme.text_dim);
+    } else {
+        draw_text(pixmap, label, PADDING_X + 8.0, text_base, font, FONT_SIZE, theme.text);
+    }
+}
+
+fn draw_settings_back_row(pixmap: &mut Pixmap, _width: u32, theme: &Theme, font: &fontdue::Font, row: usize, hovered_row: Option<usize>, hover_intensity: f32) {
+    let y = settings_row_y(row);
+    if Some(row) == hovered_row && hover_intensity > 0.0 {
+        draw_row_hover(pixmap, theme, y, hover_intensity);
+    }
+
+    let text_base = text_baseline(y, SRH, font, FONT_SIZE)
+        .unwrap_or(y + SRH / 2.0 + FONT_SIZE * 0.35);
+    draw_text(pixmap, "←  Back", PADDING_X, text_base, font, FONT_SIZE, theme.text_dim);
 }
 
 fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: HoveredTitleButton) {
     let btn_size = 32.0;
-    let x0 = width as f32 - btn_size;
-    let x1 = x0 - btn_size;
+    let x2 = width as f32 - btn_size;       // close
+    let x1 = x2 - btn_size;                 // minimize
+    let x0 = x1 - btn_size;                 // settings
 
     // фон при наведении
     let mut bg_paint = Paint::default();
@@ -184,7 +534,7 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
         HoveredTitleButton::Close => {
             bg_paint.set_color(Color::from_rgba8(196, 43, 43, 255));
             pixmap.fill_rect(
-                Rect::from_xywh(x0, 0.0, btn_size, btn_size).unwrap(),
+                Rect::from_xywh(x2, 0.0, btn_size, btn_size).unwrap(),
                 &bg_paint,
                 Transform::identity(),
                 None,
@@ -199,6 +549,15 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
                 None,
             );
         }
+        HoveredTitleButton::Settings => {
+            bg_paint.set_color(Color::from_rgba8(255, 255, 255, 20));
+            pixmap.fill_rect(
+                Rect::from_xywh(x0, 0.0, btn_size, btn_size).unwrap(),
+                &bg_paint,
+                Transform::identity(),
+                None,
+            );
+        }
         HoveredTitleButton::None => {}
     }
 
@@ -206,12 +565,12 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
     paint.set_color(theme.text_dim);
     paint.anti_alias = true;
 
-    let mut stroke = tiny_skia::Stroke::default();
-    stroke.width = 1.0;
-    stroke.line_cap = tiny_skia::LineCap::Round;
+    let mut stroke_solid = tiny_skia::Stroke::default();
+    stroke_solid.width = 1.0;
+    stroke_solid.line_cap = tiny_skia::LineCap::Round;
 
     // close — тонкий крестик
-    let cx = x0 + btn_size / 2.0;
+    let cx = x2 + btn_size / 2.0;
     let cy = btn_size / 2.0;
     let arm = 3.5;
     let mut path = tiny_skia::PathBuilder::new();
@@ -220,7 +579,7 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
     path.move_to(cx + arm, cy - arm);
     path.line_to(cx - arm, cy + arm);
     if let Some(p) = path.finish() {
-        pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+        pixmap.stroke_path(&p, &paint, &stroke_solid, Transform::identity(), None);
     }
 
     // minimize — тонкая линия подчёркивания
@@ -231,7 +590,32 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
     path.move_to(cx - half_w, cy);
     path.line_to(cx + half_w, cy);
     if let Some(p) = path.finish() {
-        pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+        pixmap.stroke_path(&p, &paint, &stroke_solid, Transform::identity(), None);
+    }
+
+    // settings — шестерёнка (окружность с четырьмя спицами)
+    let cx = x0 + btn_size / 2.0;
+    let cy = btn_size / 2.0;
+    let r = 4.0;
+    let spoke_len = 2.5;
+    // окружность
+    let mut circ = tiny_skia::PathBuilder::new();
+    circ.push_circle(cx, cy, r);
+    if let Some(p) = circ.finish() {
+        let mut stroke_circ = tiny_skia::Stroke::default();
+        stroke_circ.width = 1.0;
+        pixmap.stroke_path(&p, &paint, &stroke_circ, Transform::identity(), None);
+    }
+    // спицы
+    let mut path = tiny_skia::PathBuilder::new();
+    for angle_deg in [0.0, 90.0, 180.0, 270.0] {
+        let rad = angle_deg * std::f32::consts::PI / 180.0;
+        let (dx, dy) = (rad.cos(), rad.sin());
+        path.move_to(cx + r * dx, cy + r * dy);
+        path.line_to(cx + (r + spoke_len) * dx, cy + (r + spoke_len) * dy);
+    }
+    if let Some(p) = path.finish() {
+        pixmap.stroke_path(&p, &paint, &stroke_solid, Transform::identity(), None);
     }
 }
 
@@ -247,16 +631,28 @@ fn draw_placeholder_icon(pixmap: &mut Pixmap, cx: f32, cy: f32, size: f32, color
     }
 }
 
-fn fmt_duration(secs: u64) -> String {
+fn fmt_duration(secs: u64, show_seconds: bool) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
     if h > 0 {
-        format!("{}h {:02}m", h, m)
+        if show_seconds {
+            format!("{}h {:02}m {:02}s", h, m, s)
+        } else {
+            format!("{}h {:02}m", h, m)
+        }
     } else if m > 0 {
-        format!("{}m {:02}s", m, s)
+        if show_seconds {
+            format!("{}m {:02}s", m, s)
+        } else {
+            format!("{}m", m)
+        }
     } else {
-        format!("{}s", s)
+        if show_seconds {
+            format!("{}s", s)
+        } else {
+            "0m".to_string()
+        }
     }
 }
 
@@ -265,6 +661,17 @@ fn font() -> Option<&'static fontdue::Font> {
     FONT.get_or_init(|| {
         let data = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf")
             .or_else(|_| std::fs::read("C:\\Windows\\Fonts\\arial.ttf"))
+            .ok()?;
+        fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
+    })
+    .as_ref()
+}
+
+fn font_bold() -> Option<&'static fontdue::Font> {
+    static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        let data = std::fs::read("C:\\Windows\\Fonts\\segoeuib.ttf")
+            .or_else(|_| std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf"))
             .ok()?;
         fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
     })
@@ -456,12 +863,15 @@ mod tests {
 
     #[test]
     fn fmt_duration_roundtrip() {
-        assert_eq!(fmt_duration(0), "0s");
-        assert_eq!(fmt_duration(1), "1s");
-        assert_eq!(fmt_duration(59), "59s");
-        assert_eq!(fmt_duration(60), "1m 00s");
-        assert_eq!(fmt_duration(61), "1m 01s");
-        assert_eq!(fmt_duration(3600), "1h 00m");
-        assert_eq!(fmt_duration(3661), "1h 01m");
+        assert_eq!(fmt_duration(0, false), "0m");
+        assert_eq!(fmt_duration(0, true), "0s");
+        assert_eq!(fmt_duration(59, true), "59s");
+        assert_eq!(fmt_duration(60, true), "1m 00s");
+        assert_eq!(fmt_duration(61, true), "1m 01s");
+        assert_eq!(fmt_duration(61, false), "1m");
+        assert_eq!(fmt_duration(3600, true), "1h 00m 00s");
+        assert_eq!(fmt_duration(3600, false), "1h 00m");
+        assert_eq!(fmt_duration(3661, true), "1h 01m 01s");
+        assert_eq!(fmt_duration(3661, false), "1h 01m");
     }
 }

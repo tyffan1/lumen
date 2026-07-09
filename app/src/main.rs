@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lumen_core::{extract_exe_icon, spawn_tracker, AppIcon, TrackerEvent};
+use lumen_core::{extract_exe_icon, spawn_tracker, AppIcon, Config, TrackerEvent};
 use lumen_storage::{Session, Storage};
 use lumen_ui::{AppUsage, UserEvent};
 use tray_icon::{Icon, TrayIconBuilder, menu::{Menu, MenuEvent, MenuItem}};
@@ -14,15 +16,20 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
+    let data_dir = data_dir_path()?;
+    let config_path = data_dir.join("config.json");
+    let config = Arc::new(Mutex::new(Config::load(&config_path)));
     let shared_usage: Arc<Mutex<Vec<AppUsage>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let events = spawn_tracker(true);
-    let mut storage = Storage::open(data_file_path()?)?;
+    let events = spawn_tracker(true, config.clone());
+    let mut storage = Storage::open(data_dir.join("lumen.db"))?;
+    let clear_history_flag = Arc::new(AtomicBool::new(false));
 
     std::thread::spawn({
         let shared_usage = shared_usage.clone();
         let proxy = proxy.clone();
-        move || run_aggregator(events, &mut storage, shared_usage, proxy)
+        let clear_history_flag = clear_history_flag.clone();
+        move || run_aggregator(events, &mut storage, shared_usage, proxy, clear_history_flag)
     });
 
     let img = image::load_from_memory(include_bytes!("../../lumen.png"))
@@ -55,7 +62,7 @@ fn main() -> anyhow::Result<()> {
         }
     }));
 
-    let mut app = lumen_ui::LumenApp::new(shared_usage);
+    let mut app = lumen_ui::LumenApp::new(shared_usage, config, config_path, clear_history_flag);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -65,6 +72,7 @@ fn run_aggregator(
     storage: &mut Storage,
     shared_usage: Arc<Mutex<Vec<AppUsage>>>,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    clear_history_flag: Arc<AtomicBool>,
 ) {
     use chrono::Utc;
 
@@ -82,6 +90,15 @@ fn run_aggregator(
     let mut send_update = false;
 
     loop {
+        if clear_history_flag.load(Ordering::Relaxed) {
+            totals.clear();
+            icon_cache.clear();
+            let _ = storage.clear();
+            update_shared_usage(&shared_usage, &totals, &current, &icon_cache);
+            let _ = proxy.send_event(UserEvent::DataUpdated);
+            clear_history_flag.store(false, Ordering::Relaxed);
+        }
+
         let event = match events.recv_timeout(UI_UPDATE_INTERVAL) {
             Ok(event) => Some(event),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
@@ -256,7 +273,7 @@ fn build_usage_list(
     usage
 }
 
-fn data_file_path() -> anyhow::Result<std::path::PathBuf> {
+fn data_dir_path() -> anyhow::Result<PathBuf> {
     let base = dirs::data_local_dir()
         .or_else(|| {
             eprintln!("lumen: warning: data_local_dir() returned None, falling back to current dir");
@@ -269,5 +286,5 @@ fn data_file_path() -> anyhow::Result<std::path::PathBuf> {
 
     let dir = base.join("Lumen");
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("lumen.db"))
+    Ok(dir)
 }

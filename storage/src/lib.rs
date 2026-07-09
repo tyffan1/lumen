@@ -76,6 +76,14 @@ impl Storage {
         Ok(())
     }
 
+    /// Очищает все данные из таблицы sessions.
+    pub fn clear(&mut self) -> Result<()> {
+        self.pending.clear();
+        self.conn.execute_batch("DELETE FROM sessions")?;
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
+
     /// Агрегат "сколько секунд на каждое приложение" за период.
     pub fn totals_by_app(&self, since: DateTime<Utc>) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
