@@ -1280,10 +1280,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "windows",
+ "x11rb",
 ]
 
 [[package]]

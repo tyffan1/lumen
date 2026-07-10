@@ -31,6 +31,10 @@ thiserror = "1"
 dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Linux/X11
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "screensaver"] }
+libc = "0.2"
+
 
 windows = { version = "0.58", features = [
     "Win32_Foundation",

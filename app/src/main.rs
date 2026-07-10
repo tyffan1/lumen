@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lumen_core::{extract_exe_icon, spawn_tracker, AppIcon, Config, TrackerEvent};
+use lumen_core::{extract_exe_icon, extract_icon_by_window, spawn_tracker, AppIcon, Config, TrackerEvent};
 use lumen_storage::{Session, Storage};
 use lumen_ui::{AppUsage, UserEvent};
 use tray_icon::{Icon, TrayIconBuilder, menu::{Menu, MenuEvent, MenuItem}};
@@ -110,7 +110,9 @@ fn run_aggregator(
                 TrackerEvent::WindowChanged(info) => {
                     last_foreground = Some(info.clone());
                     if !info.exe_path.is_empty() && !icon_cache.contains_key(&info.exe_name) {
-                        if let Some(icon) = extract_exe_icon(&info.exe_path) {
+                        let icon = extract_exe_icon(&info.exe_path)
+                            .or_else(|| info.window_handle.as_ref().and_then(extract_icon_by_window));
+                        if let Some(icon) = icon {
                             icon_cache.insert(info.exe_name.clone(), icon);
                         }
                     }

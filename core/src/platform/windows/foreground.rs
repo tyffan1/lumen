@@ -4,33 +4,24 @@ use std::sync::mpsc::Sender;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, GetWindowThreadProcessId, TranslateMessage,
-    EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    DispatchMessageW, GetMessageW, GetWindowThreadProcessId, GetWindowTextLengthW,
+    GetWindowTextW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS,
 };
 
-use crate::process_info::{exe_full_path_by_pid, exe_name_by_pid};
-use crate::{ProcessInfo, TrackerEvent};
+use super::fullscreen::is_exclusive_fullscreen_raw;
+use super::process_info::{exe_full_path_by_pid, exe_name_by_pid};
+use crate::{ProcessInfo, TrackerEvent, WindowHandle};
 
 thread_local! {
     static TX: RefCell<Option<Sender<TrackerEvent>>> = RefCell::new(None);
 }
 
-pub type ForegroundEvent = TrackerEvent;
+pub struct WindowsForegroundTracker;
 
-pub struct ForegroundTracker {
-    tx: Sender<TrackerEvent>,
-}
-
-impl ForegroundTracker {
-    pub fn new(tx: Sender<TrackerEvent>) -> Self {
-        Self { tx }
-    }
-
-    /// Блокирующий вызов: регистрирует хук и крутит message loop,
-    /// пока поток жив. CPU расходуется только когда ОС реально
-    /// присылает событие смены foreground-окна — в простое поток спит.
-    pub fn run(self) {
-        TX.with(|cell| *cell.borrow_mut() = Some(self.tx.clone()));
+impl crate::ForegroundTracker for WindowsForegroundTracker {
+    fn run(self, tx: Sender<TrackerEvent>) {
+        TX.with(|cell| *cell.borrow_mut() = Some(tx.clone()));
 
         let hook: HWINEVENTHOOK = unsafe {
             SetWinEventHook(
@@ -44,7 +35,7 @@ impl ForegroundTracker {
             )
         };
 
-        emit_current_foreground(&self.tx);
+        emit_current_foreground();
 
         let mut msg = MSG::default();
         unsafe {
@@ -76,11 +67,15 @@ extern "system" fn win_event_proc(
     });
 }
 
-fn emit_current_foreground(tx: &Sender<TrackerEvent>) {
+fn emit_current_foreground() {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
     let hwnd = unsafe { GetForegroundWindow() };
     if !hwnd.0.is_null() {
-        emit_window(tx, hwnd);
+        TX.with(|cell| {
+            if let Some(tx) = cell.borrow().as_ref() {
+                emit_window(tx, hwnd);
+            }
+        });
     }
 }
 
@@ -95,9 +90,15 @@ fn emit_window(tx: &Sender<TrackerEvent>, hwnd: HWND) {
     let exe_path = exe_full_path_by_pid(pid).unwrap_or_default();
     let window_title = window_title(hwnd);
 
-    let info = ProcessInfo { pid, exe_name, exe_path, window_title };
+    let info = ProcessInfo {
+        pid,
+        exe_name,
+        exe_path,
+        window_title,
+        window_handle: Some(WindowHandle(hwnd.0 as usize)),
+    };
 
-    if crate::fullscreen::is_exclusive_fullscreen(hwnd) {
+    if is_exclusive_fullscreen_raw(hwnd) {
         let _ = tx.send(TrackerEvent::FullscreenEntered(info.clone()));
     }
 
@@ -105,7 +106,6 @@ fn emit_window(tx: &Sender<TrackerEvent>, hwnd: HWND) {
 }
 
 fn window_title(hwnd: HWND) -> String {
-    use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW};
     unsafe {
         let len = GetWindowTextLengthW(hwnd);
         if len == 0 {

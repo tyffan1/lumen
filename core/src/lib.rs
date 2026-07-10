@@ -1,22 +1,22 @@
 //! lumen-core: событийный трекинг активности окон, простоя и fullscreen-режима.
-//!
-//! Ключевая идея: НЕ поллить в цикле. Используем WinEvent hook,
-//! который будит поток только при смене foreground-окна.
-//! Это даёт почти нулевую нагрузку в состоянии простоя.
 
-mod foreground;
-mod idle;
-mod fullscreen;
-mod process_info;
-mod icon;
+mod types;
+mod window_handle;
+mod traits;
 pub mod config;
+mod idle;
+mod platform;
 
-pub use foreground::{ForegroundTracker, ForegroundEvent};
+pub use types::{AppIcon, ProcessInfo};
+pub use window_handle::WindowHandle;
+pub use traits::{ForegroundTracker, IdleDetector, FullscreenDetector, ProcessInfoProvider};
 pub use idle::IdleWatcher;
-pub use fullscreen::is_exclusive_fullscreen;
-pub use process_info::ProcessInfo;
-pub use icon::{AppIcon, extract_exe_icon};
+
+// Платформозависимые функции — re-export через #[cfg].
+#[cfg(target_os = "windows")]
 pub use config::Config;
+pub use platform::extract_exe_icon;
+pub use platform::extract_icon_by_window;
 
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 pub enum TrackerEvent {
     /// Сменился активный процесс/окно
     WindowChanged(ProcessInfo),
-    /// Пользователь ушёл в AFK (порог задаётся в IdleWatcher)
+    /// Пользователь ушёл в AFK
     IdleStarted,
     /// Вернулся из AFK
     IdleEnded,
@@ -38,27 +38,7 @@ pub enum TrackerEvent {
 /// Запускает всё необходимое (hook + idle watcher) в отдельных потоках
 /// и возвращает Receiver, из которого UI/storage слой читает события.
 ///
-/// low_priority: выставить IDLE_PRIORITY_CLASS текущему процессу,
-/// чтобы не мешать другим приложениям (актуально в играх).
+/// low_priority: выставить IDLE_PRIORITY_CLASS текущему процессу.
 pub fn spawn_tracker(low_priority: bool, config: Arc<Mutex<Config>>) -> Receiver<TrackerEvent> {
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    let tx_fg = tx.clone();
-    std::thread::spawn(move || {
-        if low_priority {
-            process_info::lower_own_priority();
-        }
-
-        let tracker = ForegroundTracker::new(tx_fg);
-        tracker.run();
-    });
-
-    let tx_idle = tx.clone();
-    let config_idle = config.clone();
-    std::thread::spawn(move || {
-        let watcher = IdleWatcher::new();
-        watcher.run(tx_idle, config_idle);
-    });
-
-    rx
+    platform::spawn_tracker_impl(low_priority, config)
 }

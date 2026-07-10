@@ -2,18 +2,22 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use crate::{IdleDetector, TrackerEvent};
+use crate::config::Config;
 
-use crate::{Config, TrackerEvent};
-
-pub struct IdleWatcher {
+/// Универсальный watcher простоя, работающий с любым `IdleDetector`.
+///
+/// Содержит платформонезависимую логику опроса, сравнения с порогом
+/// и отправки событий IdleStarted / IdleEnded.
+pub struct IdleWatcher<D: IdleDetector> {
+    detector: D,
     poll_interval: Duration,
 }
 
-impl IdleWatcher {
-    pub fn new() -> Self {
+impl<D: IdleDetector> IdleWatcher<D> {
+    pub fn new(detector: D) -> Self {
         Self {
+            detector,
             poll_interval: Duration::from_secs(5),
         }
     }
@@ -31,7 +35,7 @@ impl IdleWatcher {
                 Duration::from_secs(cfg.idle_threshold_mins as u64 * 60)
             };
 
-            let idle_for = idle_duration();
+            let idle_for = self.detector.idle_duration();
             let now_idle = idle_for >= threshold;
 
             if now_idle && !is_idle {
@@ -41,22 +45,6 @@ impl IdleWatcher {
                 is_idle = false;
                 let _ = tx.send(TrackerEvent::IdleEnded);
             }
-        }
-    }
-}
-
-fn idle_duration() -> Duration {
-    unsafe {
-        let mut info = LASTINPUTINFO {
-            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-            dwTime: 0,
-        };
-        if GetLastInputInfo(&mut info).as_bool() {
-            let now = GetTickCount();
-            let elapsed_ms = now.wrapping_sub(info.dwTime);
-            Duration::from_millis(elapsed_ms as u64)
-        } else {
-            Duration::ZERO
         }
     }
 }

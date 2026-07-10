@@ -6,15 +6,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
 };
 
-/// Эвристика exclusive/borderless fullscreen:
-///
-/// 1. Размер окна совпадает с размером монитора (как было).
-/// 2. Стиль окна не содержит одновременно WS_CAPTION и WS_THICKFRAME —
-///    иначе это просто maximized-окно с titlebar/рамкой, а не fullscreen.
-///
-/// Это дешёвая проверка (один дополнительный вызов GetWindowLongPtrW на смену
-/// foreground), которая отсекает ложные срабатывания на обычные развёрнутые окна.
-pub fn is_exclusive_fullscreen(hwnd: HWND) -> bool {
+use crate::FullscreenDetector;
+use crate::WindowHandle;
+
+/// Сырая проверка fullscreen по HWND — используется внутри
+/// foreground-трекера, где HWND уже доступен напрямую.
+pub(crate) fn is_exclusive_fullscreen_raw(hwnd: HWND) -> bool {
     unsafe {
         let mut window_rect = RECT::default();
         if GetWindowRect(hwnd, &mut window_rect).is_err() {
@@ -48,5 +45,15 @@ pub fn is_exclusive_fullscreen(hwnd: HWND) -> bool {
         }
 
         true
+    }
+}
+
+#[allow(dead_code)]
+pub struct WindowsFullscreenDetector;
+
+impl FullscreenDetector for WindowsFullscreenDetector {
+    fn is_exclusive_fullscreen(handle: &WindowHandle) -> bool {
+        let hwnd = HWND(handle.0 as *mut _);
+        is_exclusive_fullscreen_raw(hwnd)
     }
 }
