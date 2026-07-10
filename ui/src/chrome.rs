@@ -4,6 +4,7 @@ pub enum HitZone {
     CloseButton,
     MinimizeButton,
     SettingsButton,
+    ChartButton,
     SearchField,
     SearchClear,
     ResizeLeft,
@@ -27,7 +28,7 @@ const SEARCH_CLEAR_W: f64 = 24.0;
 pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64) -> HitZone {
     // Приоритет: кнопки titlebar → resize края → поиск → drag / client
 
-    // 1. Кнопки на titlebar (имеют приоритет над resize-углами сверху). Три кнопки по 32px.
+    // 1. Кнопки на titlebar (имеют приоритет над resize-углами сверху). Четыре кнопки по 32px.
     if y <= TITLEBAR_HEIGHT {
         if x >= window_width - BUTTON_SIZE {
             return HitZone::CloseButton;
@@ -37,6 +38,9 @@ pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64) -> HitZon
         }
         if x >= window_width - BUTTON_SIZE * 3.0 {
             return HitZone::SettingsButton;
+        }
+        if x >= window_width - BUTTON_SIZE * 4.0 {
+            return HitZone::ChartButton;
         }
     }
 

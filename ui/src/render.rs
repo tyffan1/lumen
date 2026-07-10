@@ -1,11 +1,13 @@
 use std::sync::OnceLock;
 
+use chrono::NaiveDate;
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppView {
     List,
     Settings,
+    Chart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -14,6 +16,7 @@ pub enum HoveredTitleButton {
     Close,
     Minimize,
     Settings,
+    Chart,
 }
 
 #[derive(Debug, Clone)]
@@ -58,10 +61,15 @@ impl Default for Theme {
     }
 }
 
-const TITLEBAR_HEIGHT: f32 = 32.0;
-const SEARCH_HEIGHT: f32 = 28.0;
-const LIST_TOP: f32 = TITLEBAR_HEIGHT + SEARCH_HEIGHT + 8.0;
-const ROW_HEIGHT: f32 = 56.0;
+pub const TITLEBAR_HEIGHT: f32 = 32.0;
+pub const SEARCH_HEIGHT: f32 = 28.0;
+pub const LIST_TOP: f32 = TITLEBAR_HEIGHT + SEARCH_HEIGHT + 8.0;
+pub const ROW_HEIGHT: f32 = 56.0;
+pub const DONUT_HEIGHT: f32 = 160.0;
+pub const SCROLLBAR_W: f32 = 4.0;
+pub fn scrollbar_x(width: u32) -> f32 {
+    width as f32 - 14.0
+}
 const FONT_SIZE: f32 = 14.0;
 const FONT_SIZE_DUR: f32 = 12.0;
 const BAR_HEIGHT: f32 = 2.0;
@@ -70,7 +78,7 @@ const ICON_SIZE: f32 = 20.0;
 const ICON_GAP: f32 = 8.0;
 const INDICATOR_W: f32 = 2.0;
 
-pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], button_hover: HoveredTitleButton, hovered_row: Option<usize>, hover_intensity: f32, search_query: &str, search_focused: bool, cursor_visible: bool, view: AppView, autostart: bool, show_seconds: bool, start_minimized: bool, idle_threshold_mins: u32, confirm_clear: bool) -> Pixmap {
+pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], button_hover: HoveredTitleButton, hovered_row: Option<usize>, hover_intensity: f32, search_query: &str, search_focused: bool, cursor_visible: bool, view: AppView, autostart: bool, show_seconds: bool, start_minimized: bool, idle_threshold_mins: u32, confirm_clear: bool, chart_data: &[(String, u64)], scroll_offset: f32, donut_data: &[(String, u64)]) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).expect("pixmap alloc");
 
     let mut paint_bg = Paint::default();
@@ -87,14 +95,6 @@ pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], bu
     let font_reg = font();
     let font_bld = font_bold();
 
-    // суммарное время слева в titlebar
-    if let Some(f) = font_reg {
-        let total_secs: u64 = usage.iter().map(|a| a.duration_secs).sum();
-        let base = text_baseline(0.0, TITLEBAR_HEIGHT, f, FONT_SIZE_DUR)
-            .unwrap_or(TITLEBAR_HEIGHT / 2.0 + FONT_SIZE_DUR * 0.35);
-        draw_text(&mut pixmap, &fmt_duration(total_secs, false), PADDING_X, base, f, FONT_SIZE_DUR, theme.text_dim);
-    }
-
     let mut paint_sep = Paint::default();
     paint_sep.set_color(theme.separator);
     pixmap.fill_rect(
@@ -105,88 +105,32 @@ pub fn draw_frame(width: u32, height: u32, theme: &Theme, usage: &[AppUsage], bu
     );
 
     match view {
-        AppView::List => draw_list_content(&mut pixmap, width, height, theme, usage, hovered_row, hover_intensity, font_reg, font_bld, search_query, search_focused, cursor_visible, show_seconds),
+        AppView::List => draw_list_content(&mut pixmap, width, height, theme, usage, hovered_row, hover_intensity, font_reg, font_bld, search_query, search_focused, cursor_visible, show_seconds, scroll_offset, donut_data),
         AppView::Settings => draw_settings(&mut pixmap, width, height, theme, font_reg, autostart, show_seconds, start_minimized, idle_threshold_mins, hovered_row, hover_intensity, confirm_clear),
+        AppView::Chart => draw_chart(&mut pixmap, width, height, theme, font_reg, font_bld, chart_data, hovered_row, hover_intensity),
     }
 
     pixmap
 }
 
-fn draw_list_content(pixmap: &mut Pixmap, width: u32, height: u32, theme: &Theme, usage: &[AppUsage], hovered_row: Option<usize>, hover_intensity: f32, font_reg: Option<&fontdue::Font>, font_bld: Option<&fontdue::Font>, search_query: &str, search_focused: bool, cursor_visible: bool, show_seconds: bool) {
-    // поле поиска
-    let search_y = TITLEBAR_HEIGHT;
-    if let Some(f) = font_reg {
-        let base = text_baseline(search_y, SEARCH_HEIGHT, f, FONT_SIZE_DUR)
-            .unwrap_or(search_y + SEARCH_HEIGHT / 2.0 + FONT_SIZE_DUR * 0.35);
-        let display = if search_query.is_empty() && !search_focused {
-            "Search..."
-        } else {
-            search_query
-        };
-        let color = if search_query.is_empty() && !search_focused {
-            theme.text_dim
-        } else {
-            theme.text
-        };
-        draw_text(pixmap, display, PADDING_X, base, f, FONT_SIZE_DUR, color);
-
-        // крестик очистки ×
-        if !search_query.is_empty() {
-            let clear_cx = (width as f32) - PADDING_X - 10.0;
-            let clear_cy = search_y + SEARCH_HEIGHT / 2.0;
-            let arm = 3.0;
-            let mut path = tiny_skia::PathBuilder::new();
-            path.move_to(clear_cx - arm, clear_cy - arm);
-            path.line_to(clear_cx + arm, clear_cy + arm);
-            path.move_to(clear_cx + arm, clear_cy - arm);
-            path.line_to(clear_cx - arm, clear_cy + arm);
-            if let Some(p) = path.finish() {
-                let mut stroke = tiny_skia::Stroke::default();
-                stroke.width = 1.0;
-                stroke.line_cap = tiny_skia::LineCap::Round;
-                let mut paint = Paint::default();
-                paint.set_color(theme.text_dim);
-                pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
-            }
-        }
-
-        // мигающий курсор
-        if search_focused && cursor_visible {
-            let text_w = measure_text(search_query, f, FONT_SIZE_DUR);
-            let cursor_x = PADDING_X + text_w + 1.0;
-            let cursor_y0 = base - 8.0;
-            let cursor_y1 = base + 2.0;
-            let mut path = tiny_skia::PathBuilder::new();
-            path.move_to(cursor_x, cursor_y0);
-            path.line_to(cursor_x, cursor_y1);
-            if let Some(p) = path.finish() {
-                let mut stroke = tiny_skia::Stroke::default();
-                stroke.width = 1.0;
-                let mut paint = Paint::default();
-                paint.set_color(theme.text);
-                pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
-            }
-        }
-    }
-
-    // нижняя линия поля поиска
-    let underline_y = TITLEBAR_HEIGHT + SEARCH_HEIGHT - 1.0;
-    let mut pu = Paint::default();
-    pu.set_color(if search_focused { theme.accent } else { theme.separator });
-    pixmap.fill_rect(
-        Rect::from_xywh(PADDING_X, underline_y, (width as f32) - PADDING_X * 2.0, 1.0).unwrap(),
-        &pu,
-        Transform::identity(),
-        None,
-    );
-
-    let mut y = LIST_TOP;
+fn draw_list_content(pixmap: &mut Pixmap, width: u32, height: u32, theme: &Theme, usage: &[AppUsage], hovered_row: Option<usize>, hover_intensity: f32, font_reg: Option<&fontdue::Font>, font_bld: Option<&fontdue::Font>, search_query: &str, search_focused: bool, cursor_visible: bool, show_seconds: bool, scroll_offset: f32, donut_data: &[(String, u64)]) {
+    // скроллируемый список
+    let viewport_bottom = (height as f32) - DONUT_HEIGHT;
+    let first_row = (scroll_offset / ROW_HEIGHT).floor() as usize;
+    let fractional = scroll_offset - first_row as f32 * ROW_HEIGHT;
+    let mut y = LIST_TOP - fractional;
     let max_dur = usage.iter().map(|a| a.duration_secs).max().unwrap_or(0);
 
-    for (i, app) in usage.iter().enumerate() {
-        if y + ROW_HEIGHT > height as f32 {
+    let fade_zone = 36.0;
+
+    for i in first_row..usage.len() {
+        if y >= viewport_bottom {
             break;
         }
+
+        let row_alpha = ((viewport_bottom - y) / fade_zone).clamp(0.0, 1.0);
+
+        let app = &usage[i];
 
         if app.is_active {
             let mut paint_ind = Paint::default();
@@ -253,7 +197,7 @@ fn draw_list_content(pixmap: &mut Pixmap, width: u32, height: u32, theme: &Theme
             draw_text(
                 pixmap,
                 &dur_str,
-                (width as f32 - text_w - PADDING_X).max(name_x + 8.0),
+                (width as f32 - text_w - PADDING_X - 16.0).max(name_x + 8.0),
                 base,
                 f,
                 FONT_SIZE_DUR,
@@ -282,8 +226,102 @@ fn draw_list_content(pixmap: &mut Pixmap, width: u32, height: u32, theme: &Theme
             }
         }
 
+        // затемнение ближнего к диаграмме элемента
+        if row_alpha < 1.0 {
+            let a = ((1.0 - row_alpha) * 180.0) as u8;
+            let mut dim = Paint::default();
+            dim.set_color(Color::from_rgba8(0, 0, 0, a));
+            pixmap.fill_rect(
+                Rect::from_xywh(0.0, y, width as f32, ROW_HEIGHT).unwrap(),
+                &dim,
+                Transform::identity(),
+                None,
+            );
+        }
+
         y += ROW_HEIGHT;
     }
+
+    // поле поиска (поверх списка)
+    let search_y = TITLEBAR_HEIGHT;
+    if let Some(f) = font_reg {
+        let base = text_baseline(search_y, SEARCH_HEIGHT, f, FONT_SIZE_DUR)
+            .unwrap_or(search_y + SEARCH_HEIGHT / 2.0 + FONT_SIZE_DUR * 0.35);
+        let display = if search_query.is_empty() && !search_focused {
+            "Search..."
+        } else {
+            search_query
+        };
+        let color = if search_query.is_empty() && !search_focused {
+            theme.text_dim
+        } else {
+            theme.text
+        };
+        draw_text(pixmap, display, PADDING_X, base, f, FONT_SIZE_DUR, color);
+
+        // крестик очистки ×
+        if !search_query.is_empty() {
+            let clear_cx = (width as f32) - PADDING_X - 10.0;
+            let clear_cy = search_y + SEARCH_HEIGHT / 2.0;
+            let arm = 3.0;
+            let mut path = tiny_skia::PathBuilder::new();
+            path.move_to(clear_cx - arm, clear_cy - arm);
+            path.line_to(clear_cx + arm, clear_cy + arm);
+            path.move_to(clear_cx + arm, clear_cy - arm);
+            path.line_to(clear_cx - arm, clear_cy + arm);
+            if let Some(p) = path.finish() {
+                let mut stroke = tiny_skia::Stroke::default();
+                stroke.width = 1.0;
+                stroke.line_cap = tiny_skia::LineCap::Round;
+                let mut paint = Paint::default();
+                paint.set_color(theme.text_dim);
+                pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+
+        // мигающий курсор
+        if search_focused && cursor_visible {
+            let text_w = measure_text(search_query, f, FONT_SIZE_DUR);
+            let cursor_x = PADDING_X + text_w + 1.0;
+            let cursor_y0 = base - 8.0;
+            let cursor_y1 = base + 2.0;
+            let mut path = tiny_skia::PathBuilder::new();
+            path.move_to(cursor_x, cursor_y0);
+            path.line_to(cursor_x, cursor_y1);
+            if let Some(p) = path.finish() {
+                let mut stroke = tiny_skia::Stroke::default();
+                stroke.width = 1.0;
+                let mut paint = Paint::default();
+                paint.set_color(theme.text);
+                pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+    }
+
+    // нижняя линия поля поиска
+    let mut pu = Paint::default();
+    pu.set_color(if search_focused { theme.accent } else { theme.separator });
+    pixmap.fill_rect(
+        Rect::from_xywh(PADDING_X, TITLEBAR_HEIGHT + SEARCH_HEIGHT - 1.0, (width as f32) - PADDING_X * 2.0, 1.0).unwrap(),
+        &pu,
+        Transform::identity(),
+        None,
+    );
+
+    draw_scrollbar(pixmap, width, LIST_TOP, viewport_bottom, scroll_offset, usage.len(), theme);
+    draw_fade_gradient(pixmap, width, viewport_bottom, theme);
+
+    // непрозрачный фон под диаграммой — закрывает любой вылез строк за viewport_bottom
+    let mut donut_bg = Paint::default();
+    donut_bg.set_color(theme.background);
+    pixmap.fill_rect(
+        Rect::from_xywh(0.0, viewport_bottom, width as f32, (height as f32) - viewport_bottom).unwrap(),
+        &donut_bg,
+        Transform::identity(),
+        None,
+    );
+
+    draw_donut(pixmap, width, height, theme, font_reg, font_bld, donut_data);
 }
 
 fn draw_settings(pixmap: &mut Pixmap, width: u32, _height: u32, theme: &Theme, font: Option<&fontdue::Font>, autostart: bool, show_seconds: bool, start_minimized: bool, idle_threshold_mins: u32, hovered_row: Option<usize>, hover_intensity: f32, confirm_clear: bool) {
@@ -520,11 +558,292 @@ fn draw_settings_back_row(pixmap: &mut Pixmap, _width: u32, theme: &Theme, font:
     draw_text(pixmap, "←  Back", PADDING_X, text_base, font, FONT_SIZE, theme.text_dim);
 }
 
+/// Y-координата строки «← Back» на экране Chart.
+pub fn chart_back_y(height: u32) -> f32 {
+    height as f32 - 24.0
+}
+
+fn draw_chart(pixmap: &mut Pixmap, width: u32, height: u32, theme: &Theme, font_reg: Option<&fontdue::Font>, font_bld: Option<&fontdue::Font>, data: &[(String, u64)], hovered_row: Option<usize>, hover_intensity: f32) {
+    let header_y = TITLEBAR_HEIGHT + 20.0;
+    if let Some(f) = font_bld {
+        draw_text(pixmap, "Daily Usage (7 days)", PADDING_X, header_y, f, FONT_SIZE, theme.text);
+    }
+
+    let chart_top = header_y + 28.0;
+    let chart_bottom = chart_back_y(height) - 36.0;
+    let chart_h = chart_bottom - chart_top;
+    if chart_h <= 0.0 {
+        return;
+    }
+
+    let max_val = data.iter().map(|(_, v)| *v).max().unwrap_or(1).max(1);
+    let n = data.len().max(1);
+    let gap = 4.0;
+    let chart_left = PADDING_X + 4.0;
+    let chart_right = (width as f32) - PADDING_X - 4.0;
+    let chart_w = chart_right - chart_left;
+    let bar_w = (chart_w - gap * (n as f32 + 1.0)) / n as f32;
+
+    for (i, (date_str, val)) in data.iter().enumerate() {
+        let bar_h = (*val as f32 / max_val as f32) * (chart_h - 36.0);
+        let bar_x = chart_left + gap + i as f32 * (bar_w + gap);
+        let bar_y = chart_bottom - bar_h;
+
+        let mut paint = Paint::default();
+        paint.set_color(theme.accent);
+        pixmap.fill_rect(
+            Rect::from_xywh(bar_x, bar_y, bar_w, bar_h).unwrap(),
+            &paint,
+            Transform::identity(),
+            None,
+        );
+
+        if *val > 0 {
+            if let Some(f) = font_reg {
+                let dur_str = fmt_duration(*val, false);
+                let text_w = measure_text(&dur_str, f, FONT_SIZE_DUR);
+                let tx = bar_x + bar_w / 2.0 - text_w / 2.0;
+                let ty = bar_y - 6.0;
+                draw_text(pixmap, &dur_str, tx, ty, f, FONT_SIZE_DUR, theme.text);
+            }
+        }
+
+        if let Some(f) = font_reg {
+            let label = if let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                d.format("%a %m/%d").to_string()
+            } else {
+                date_str[5..].to_string()
+            };
+            let text_w = measure_text(&label, f, FONT_SIZE_DUR);
+            let tx = bar_x + bar_w / 2.0 - text_w / 2.0;
+            let ty = chart_bottom + 2.0 + FONT_SIZE_DUR;
+            draw_text(pixmap, &label, tx, ty, f, FONT_SIZE_DUR, theme.text_dim);
+        }
+    }
+
+    if data.is_empty() {
+        if let Some(f) = font_reg {
+            let msg = "No data yet";
+            let text_w = measure_text(msg, f, FONT_SIZE);
+            let tx = (width as f32 - text_w) / 2.0;
+            let ty = (chart_top + chart_bottom) / 2.0;
+            draw_text(pixmap, msg, tx, ty, f, FONT_SIZE, theme.text_dim);
+        }
+    }
+
+    // ← Back
+    let back_y = chart_back_y(height);
+    if Some(0) == hovered_row && hover_intensity > 0.0 {
+        draw_row_hover(pixmap, theme, back_y - 12.0, hover_intensity);
+    }
+    if let Some(f) = font_bld {
+        draw_text(pixmap, "←  Back", PADDING_X, back_y, f, FONT_SIZE, theme.text_dim);
+    }
+}
+
+fn donut_colors() -> [Color; 6] {
+    [
+        Color::from_rgba8( 74, 144, 217, 255),
+        Color::from_rgba8(232, 145,  58, 255),
+        Color::from_rgba8( 58, 180, 123, 255),
+        Color::from_rgba8(155,  89, 182, 255),
+        Color::from_rgba8(231,  76,  60, 255),
+        Color::from_rgba8( 72,  72,  76, 255),
+    ]
+}
+
+fn draw_scrollbar(pixmap: &mut Pixmap, width: u32, viewport_top: f32, viewport_bottom: f32, scroll_offset: f32, content_len: usize, _theme: &Theme) {
+    let content_h = content_len as f32 * ROW_HEIGHT;
+    let viewport_h = viewport_bottom - viewport_top;
+    if content_h <= viewport_h {
+        return;
+    }
+    let max_scroll = content_h - viewport_h;
+    let sb_x = scrollbar_x(width);
+    let sb_w = SCROLLBAR_W;
+    let track_h = viewport_h;
+    let thumb_h = (viewport_h / content_h * track_h).max(12.0);
+    let thumb_y = viewport_top + (scroll_offset / max_scroll) * (track_h - thumb_h);
+
+    let mut tp = Paint::default();
+    tp.set_color(Color::from_rgba8(128, 128, 128, 30));
+    pixmap.fill_rect(
+        Rect::from_xywh(sb_x, viewport_top, sb_w, track_h).unwrap(),
+        &tp,
+        Transform::identity(),
+        None,
+    );
+
+    let mut pp = Paint::default();
+    pp.set_color(Color::from_rgba8(128, 128, 128, 120));
+    pixmap.fill_rect(
+        Rect::from_xywh(sb_x, thumb_y, sb_w, thumb_h).unwrap(),
+        &pp,
+        Transform::identity(),
+        None,
+    );
+}
+
+fn draw_fade_gradient(pixmap: &mut Pixmap, width: u32, viewport_bottom: f32, theme: &Theme) {
+    let fade_h = 36.0;
+    let fade_top = viewport_bottom - fade_h;
+    if fade_top < LIST_TOP {
+        return;
+    }
+    let br = (theme.background.red() * 255.0) as u8;
+    let bg = (theme.background.green() * 255.0) as u8;
+    let bb = (theme.background.blue() * 255.0) as u8;
+    for i in 0..36 {
+        let a = (i as f32 / 36.0 * 255.0) as u8;
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgba8(br, bg, bb, a));
+        pixmap.fill_rect(
+            Rect::from_xywh(0.0, fade_top + i as f32, width as f32, 1.0).unwrap(),
+            &paint,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+fn angle_pts(cx: f32, cy: f32, r: f32, start: f32, end: f32, steps: usize) -> Vec<(f32, f32)> {
+    let mut pts = Vec::with_capacity(steps + 1);
+    let da = (end - start) / steps as f32;
+    for i in 0..=steps {
+        let a = start + da * i as f32;
+        pts.push((cx + a.cos() * r, cy + a.sin() * r));
+    }
+    pts
+}
+
+fn draw_donut_segment(pixmap: &mut Pixmap, cx: f32, cy: f32, ir: f32, or_: f32, start: f32, end: f32, color: Color) {
+    let steps = 30;
+    let outer = angle_pts(cx, cy, or_, start, end, steps);
+    let inner = angle_pts(cx, cy, ir, start, end, steps);
+    let mut path = tiny_skia::PathBuilder::new();
+    path.move_to(outer[0].0, outer[0].1);
+    for &(x, y) in &outer[1..] {
+        path.line_to(x, y);
+    }
+    for &(x, y) in inner.iter().rev() {
+        path.line_to(x, y);
+    }
+    path.close();
+    if let Some(p) = path.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+fn draw_donut(pixmap: &mut Pixmap, width: u32, height: u32, theme: &Theme, _font_reg: Option<&fontdue::Font>, font_bld: Option<&fontdue::Font>, data: &[(String, u64)]) {
+    let Some(bld) = font_bld else { return };
+
+    let donut_top = (height as f32) - DONUT_HEIGHT;
+    let cx = width as f32 / 2.0;
+    let cy = donut_top + DONUT_HEIGHT * 0.45;
+    let or_ = (DONUT_HEIGHT * 0.5 - 18.0).max(20.0).min(80.0);
+    let ir = or_ * 0.42;
+
+    let total: u64 = data.iter().map(|(_, v)| v).sum();
+    let total_str = format!("Today — {}", fmt_duration(total, false));
+    let tw = measure_text(&total_str, bld, FONT_SIZE);
+    draw_text(pixmap, &total_str, (width as f32 - tw) / 2.0, donut_top - 2.0, bld, FONT_SIZE, theme.text);
+
+    if data.is_empty() || total == 0 {
+        let msg = "No activity yet";
+        let mw = measure_text(msg, bld, FONT_SIZE);
+        draw_text(pixmap, msg, (width as f32 - mw) / 2.0, cy, bld, FONT_SIZE, theme.text_dim);
+        let mut path = tiny_skia::PathBuilder::new();
+        path.push_circle(cx, cy, or_);
+        if let Some(p) = path.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(theme.separator);
+            let mut stroke = tiny_skia::Stroke::default();
+            stroke.width = 2.0;
+            pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+        }
+        return;
+    }
+
+    let mut sorted: Vec<&(String, u64)> = data.iter().filter(|(_, v)| *v > 0).collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    let n = sorted.len().min(5);
+    let other_sum: u64 = if sorted.len() > 5 {
+        sorted[5..].iter().map(|(_, v)| v).sum()
+    } else {
+        0
+    };
+
+    let colors = donut_colors();
+    let mut start_a = -90.0_f32.to_radians();
+    for i in 0..n {
+        let angle = (sorted[i].1 as f32 / total as f32) * 360.0_f32.to_radians();
+        let end_a = start_a + angle;
+        draw_donut_segment(pixmap, cx, cy, ir, or_, start_a, end_a, colors[i]);
+        start_a = end_a;
+    }
+    if other_sum > 0 {
+        let angle = (other_sum as f32 / total as f32) * 360.0_f32.to_radians();
+        let end_a = start_a + angle;
+        draw_donut_segment(pixmap, cx, cy, ir, or_, start_a, end_a, colors[5]);
+    }
+
+    let mut hole = tiny_skia::PathBuilder::new();
+    hole.push_circle(cx, cy, ir);
+    if let Some(p) = hole.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(theme.background);
+        paint.anti_alias = true;
+        pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
+
+    // легенда под пончиком
+    let dot_r = 3.0;
+    let lgap = 8.0;
+    let legend_y1 = donut_top + DONUT_HEIGHT * 0.78 + 4.0;
+    let mut all_items: Vec<(&str, &Color)> = sorted[..n].iter().enumerate().map(|(i, (name, _))| {
+        (name.strip_suffix(".exe").unwrap_or(name), &colors[i])
+    }).collect();
+    if other_sum > 0 {
+        all_items.push(("Other", &colors[5]));
+    }
+
+    let mut draw_row = |y: f32, slice: &[(&str, &Color)]| {
+        let mut lx = PADDING_X;
+        for &(label, color) in slice {
+            let dot_cx = lx + dot_r;
+            let dot_cy = y - dot_r;
+            let mut dp = Paint::default();
+            dp.set_color(*color);
+            dp.anti_alias = true;
+            let mut circle = tiny_skia::PathBuilder::new();
+            circle.push_circle(dot_cx, dot_cy, dot_r);
+            if let Some(c) = circle.finish() {
+                pixmap.fill_path(&c, &dp, tiny_skia::FillRule::Winding, Transform::identity(), None);
+            }
+            let tx = lx + dot_r * 2.0 + 4.0;
+            draw_text(pixmap, label, tx, y, bld, FONT_SIZE_DUR, theme.text);
+            lx = tx + measure_text(label, bld, FONT_SIZE_DUR) + lgap;
+        }
+    };
+
+    let first = all_items.len().min(3);
+    if first > 0 {
+        draw_row(legend_y1, &all_items[..first]);
+    }
+    if all_items.len() > first {
+        draw_row(legend_y1 + 18.0, &all_items[first..]);
+    }
+}
+
 fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: HoveredTitleButton) {
     let btn_size = 32.0;
-    let x2 = width as f32 - btn_size;       // close
-    let x1 = x2 - btn_size;                 // minimize
-    let x0 = x1 - btn_size;                 // settings
+    let x3 = width as f32 - btn_size;       // close
+    let x2 = x3 - btn_size;                 // minimize
+    let x1 = x2 - btn_size;                 // settings
+    let x0 = x1 - btn_size;                 // chart
 
     // фон при наведении
     let mut bg_paint = Paint::default();
@@ -534,7 +853,7 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
         HoveredTitleButton::Close => {
             bg_paint.set_color(Color::from_rgba8(196, 43, 43, 255));
             pixmap.fill_rect(
-                Rect::from_xywh(x2, 0.0, btn_size, btn_size).unwrap(),
+                Rect::from_xywh(x3, 0.0, btn_size, btn_size).unwrap(),
                 &bg_paint,
                 Transform::identity(),
                 None,
@@ -543,13 +862,22 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
         HoveredTitleButton::Minimize => {
             bg_paint.set_color(Color::from_rgba8(255, 255, 255, 20));
             pixmap.fill_rect(
-                Rect::from_xywh(x1, 0.0, btn_size, btn_size).unwrap(),
+                Rect::from_xywh(x2, 0.0, btn_size, btn_size).unwrap(),
                 &bg_paint,
                 Transform::identity(),
                 None,
             );
         }
         HoveredTitleButton::Settings => {
+            bg_paint.set_color(Color::from_rgba8(255, 255, 255, 20));
+            pixmap.fill_rect(
+                Rect::from_xywh(x1, 0.0, btn_size, btn_size).unwrap(),
+                &bg_paint,
+                Transform::identity(),
+                None,
+            );
+        }
+        HoveredTitleButton::Chart => {
             bg_paint.set_color(Color::from_rgba8(255, 255, 255, 20));
             pixmap.fill_rect(
                 Rect::from_xywh(x0, 0.0, btn_size, btn_size).unwrap(),
@@ -570,7 +898,7 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
     stroke_solid.line_cap = tiny_skia::LineCap::Round;
 
     // close — тонкий крестик
-    let cx = x2 + btn_size / 2.0;
+    let cx = x3 + btn_size / 2.0;
     let cy = btn_size / 2.0;
     let arm = 3.5;
     let mut path = tiny_skia::PathBuilder::new();
@@ -583,7 +911,7 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
     }
 
     // minimize — тонкая линия подчёркивания
-    let cx = x1 + btn_size / 2.0;
+    let cx = x2 + btn_size / 2.0;
     let cy = btn_size * 0.65;
     let half_w = 4.5;
     let mut path = tiny_skia::PathBuilder::new();
@@ -594,11 +922,10 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
     }
 
     // settings — шестерёнка (окружность с четырьмя спицами)
-    let cx = x0 + btn_size / 2.0;
+    let cx = x1 + btn_size / 2.0;
     let cy = btn_size / 2.0;
     let r = 4.0;
     let spoke_len = 2.5;
-    // окружность
     let mut circ = tiny_skia::PathBuilder::new();
     circ.push_circle(cx, cy, r);
     if let Some(p) = circ.finish() {
@@ -606,7 +933,6 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
         stroke_circ.width = 1.0;
         pixmap.stroke_path(&p, &paint, &stroke_circ, Transform::identity(), None);
     }
-    // спицы
     let mut path = tiny_skia::PathBuilder::new();
     for angle_deg in [0.0, 90.0, 180.0, 270.0] {
         let rad = angle_deg * std::f32::consts::PI / 180.0;
@@ -616,6 +942,24 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, theme: &Theme, hover: 
     }
     if let Some(p) = path.finish() {
         pixmap.stroke_path(&p, &paint, &stroke_solid, Transform::identity(), None);
+    }
+
+    // chart — три столбика (бар-чарт)
+    let cx = x0 + btn_size / 2.0;
+    let cy = btn_size / 2.0 + 2.0;
+    let bar_w = 2.0;
+    let bar_gap = 2.0;
+    let heights = [5.0, 10.0, 7.0];
+    let starts_x = cx - (bar_w * 3.0 + bar_gap * 2.0) / 2.0;
+    for (i, &h) in heights.iter().enumerate() {
+        let bx = starts_x + i as f32 * (bar_w + bar_gap);
+        let by = cy + 8.0 - h;
+        pixmap.fill_rect(
+            Rect::from_xywh(bx, by, bar_w, h).unwrap(),
+            &paint,
+            Transform::identity(),
+            None,
+        );
     }
 }
 

@@ -100,4 +100,25 @@ impl Storage {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Агрегат "сколько секунд на каждое приложение" с начала сегодняшнего дня (локальное время).
+    /// Использует datetime(..., 'localtime') для корректного часового пояса.
+    /// Возвращает суммарное время (секунды) по дням за последние `days` дней.
+    /// Возвращает Vec<(дата "YYYY-MM-DD", total_seconds)> только для дней, в которых есть данные.
+    pub fn usage_by_day(&self, days: u32) -> Result<Vec<(String, i64)>> {
+        let since = Utc::now() - chrono::Duration::days(days as i64);
+        let mut stmt = self.conn.prepare(
+            "SELECT DATE(started_at, 'unixepoch') as day, SUM(ended_at - started_at) as total
+             FROM sessions
+             WHERE started_at >= ?1
+             GROUP BY day
+             ORDER BY day ASC",
+        )?;
+        let rows = stmt
+            .query_map([since.timestamp()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
 }

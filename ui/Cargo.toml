@@ -5,10 +5,12 @@ edition.workspace = true
 
 [dependencies]
 lumen-core.workspace = true
+lumen-storage.workspace = true
 winit.workspace = true
 softbuffer.workspace = true
 tiny-skia.workspace = true
 fontdue.workspace = true
+chrono.workspace = true
 anyhow.workspace = true
 windows.workspace = true
 winreg = "0.52"

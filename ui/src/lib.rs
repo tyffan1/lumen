@@ -7,6 +7,7 @@ pub use render::AppView;
 pub use render::HoveredTitleButton;
 
 use lumen_core::Config;
+use lumen_storage::Storage;
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -77,6 +78,22 @@ pub struct LumenApp {
     confirm_clear: bool,
     /// Флаг для агрегатора: очистить историю.
     clear_history_flag: Arc<AtomicBool>,
+    /// Соединение с БД для запроса данных графика (только чтение).
+    storage: Option<Storage>,
+    /// Кэш по-дневной статистики: Vec<(дата "YYYY-MM-DD", секунды)>.
+    chart_cache: Vec<(String, u64)>,
+    /// Смещение скролла списка приложений (в пикселях).
+    scroll_offset: f32,
+    /// Целевое смещение для плавной анимации скролла.
+    scroll_target: f32,
+    /// Кэш данных для круговой диаграммы: Vec<(имя, секунды_за_сегодня)>.
+    donut_cache: Vec<(String, u64)>,
+    /// true, когда пользователь тащит ползунок скроллбара.
+    scroll_dragging: bool,
+    /// Y мыши (в координатах окна) в момент начала перетаскивания ползунка.
+    scroll_drag_start_y: f64,
+    /// scroll_target в момент начала перетаскивания.
+    scroll_drag_start_offset: f32,
 }
 
 impl LumenApp {
@@ -108,6 +125,14 @@ impl LumenApp {
             config_path,
             confirm_clear: false,
             clear_history_flag,
+            storage: None,
+            chart_cache: Vec::new(),
+            scroll_offset: 0.0,
+            scroll_target: 0.0,
+            donut_cache: Vec::new(),
+            scroll_dragging: false,
+            scroll_drag_start_y: 0.0,
+            scroll_drag_start_offset: 0.0,
         }
     }
 
@@ -157,7 +182,8 @@ impl LumenApp {
     /// через TICK_INTERVAL. Вызывается из обработчика RedrawRequested,
     /// где event_loop доступен.
     fn schedule_next_tick(&self, event_loop: &ActiveEventLoop) {
-        let animating = self.hover_progress > 0.0 && self.hover_progress < 1.0;
+        let animating = (self.hover_progress > 0.0 && self.hover_progress < 1.0)
+            || (self.scroll_offset != self.scroll_target);
         if animating {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 std::time::Instant::now() + Duration::from_millis(16),
@@ -235,6 +261,12 @@ impl ApplicationHandler<UserEvent> for LumenApp {
         } else {
             self.window_visible = true;
         }
+
+        if self.storage.is_none() {
+            let db_path = self.config_path.parent().unwrap().join("lumen.db");
+            self.storage = Storage::open(&db_path).ok();
+        }
+
         self.mark_dirty();
     }
 
@@ -292,10 +324,23 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             chrome::HitZone::MinimizeButton => {
                                 window.set_minimized(true);
                             }
+                            chrome::HitZone::ChartButton => {
+                                self.current_view = match self.current_view {
+                                    AppView::Chart => AppView::List,
+                                    _ => AppView::Chart,
+                                };
+                                self.search_focused = false;
+                                self.hovered_row = None;
+                                self.confirm_clear = false;
+                                if self.current_view == AppView::Chart {
+                                    self.refresh_chart_cache();
+                                }
+                                self.dirty = true;
+                            }
                             chrome::HitZone::SettingsButton => {
                                 self.current_view = match self.current_view {
-                                    AppView::List => AppView::Settings,
                                     AppView::Settings => AppView::List,
+                                    _ => AppView::Settings,
                                 };
                                 self.search_focused = false;
                                 self.hovered_row = None;
@@ -323,6 +368,13 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             chrome::HitZone::ResizeTopRight => { let _ = window.drag_resize_window(ResizeDirection::NorthEast); }
                             chrome::HitZone::ResizeBottomLeft => { let _ = window.drag_resize_window(ResizeDirection::SouthWest); }
                             chrome::HitZone::ResizeBottomRight => { let _ = window.drag_resize_window(ResizeDirection::SouthEast); }
+                            chrome::HitZone::Client if self.current_view == AppView::Chart => {
+                                if self.hovered_row == Some(0) {
+                                    self.current_view = AppView::List;
+                                    self.hovered_row = None;
+                                    self.dirty = true;
+                                }
+                            }
                             chrome::HitZone::Client if self.current_view == AppView::Settings => {
                                 if let Some(row) = render::settings_row_at(cy as f32) {
                                     match row {
@@ -390,6 +442,28 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                                     }
                                 }
                             }
+                            _ if self.current_view == AppView::List
+                                && (cx as f32) >= render::scrollbar_x(size.width)
+                                && (cx as f32) <= render::scrollbar_x(size.width) + render::SCROLLBAR_W
+                                && (cy as f32) >= render::LIST_TOP
+                                && (cy as f32) <= (size.height as f32) - render::DONUT_HEIGHT =>
+                            {
+                                let vp_bottom = (size.height as f32) - render::DONUT_HEIGHT;
+                                let vp_h = vp_bottom - render::LIST_TOP;
+                                let usage_len = self.shared_usage.lock().unwrap().len();
+                                let content_h = usage_len as f32 * render::ROW_HEIGHT;
+                                if content_h > vp_h {
+                                    let max_scroll = content_h - vp_h;
+                                    let track_h = vp_h;
+                                    let thumb_h = (vp_h / content_h * track_h).max(12.0);
+                                    let click_ratio = ((cy as f32 - render::LIST_TOP) - thumb_h / 2.0) / (track_h - thumb_h);
+                                    self.scroll_target = (click_ratio * max_scroll).clamp(0.0, max_scroll);
+                                }
+                                self.scroll_dragging = true;
+                                self.scroll_drag_start_y = cy;
+                                self.scroll_drag_start_offset = self.scroll_target;
+                                self.dirty = true;
+                            }
                             _ => {
                                 if self.search_focused {
                                     self.search_focused = false;
@@ -399,7 +473,10 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             }
                         }
                     }
-                    ElementState::Released => self.dragging = false,
+                    ElementState::Released => {
+                        self.dragging = false;
+                        self.scroll_dragging = false;
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -407,11 +484,31 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                 if self.dragging {
                     self.drag_window(position.x, position.y);
                 }
+                if self.scroll_dragging {
+                    if let Some(window) = &self.window {
+                        let size = window.inner_size();
+                        let vp_bottom = (size.height as f32) - render::DONUT_HEIGHT;
+                        let vp_h = vp_bottom - render::LIST_TOP;
+                        let usage_len = self.shared_usage.lock().unwrap().len();
+                        let content_h = usage_len as f32 * render::ROW_HEIGHT;
+                        if content_h > vp_h {
+                            let max_scroll = content_h - vp_h;
+                            let track_h = vp_h;
+                            let thumb_h = (vp_h / content_h * track_h).max(12.0);
+                            let dy = position.y - self.scroll_drag_start_y;
+                            let ratio = dy as f32 / (track_h - thumb_h);
+                            let new_offset = (self.scroll_drag_start_offset + ratio * max_scroll).clamp(0.0, max_scroll);
+                            self.scroll_target = new_offset;
+                        }
+                        self.dirty = true;
+                        window.request_redraw();
+                    }
+                }
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
                     let zone = chrome::hit_test(position.x, position.y, size.width as f64, size.height as f64);
                     let new_hover = match zone {
-                        chrome::HitZone::CloseButton | chrome::HitZone::MinimizeButton | chrome::HitZone::SettingsButton => Some(zone),
+                        chrome::HitZone::CloseButton | chrome::HitZone::MinimizeButton | chrome::HitZone::SettingsButton | chrome::HitZone::ChartButton => Some(zone),
                         _ => None,
                     };
                     if new_hover != self.hovered_button {
@@ -420,8 +517,9 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                         window.request_redraw();
                     }
                     if self.current_view == AppView::List {
-                        let new_row = if position.y > 68.0 {
-                            Some(((position.y - 68.0) / 56.0) as usize)
+                        let vp_bottom = (size.height as f32 - render::DONUT_HEIGHT) as f64;
+                        let new_row = if position.y > render::LIST_TOP as f64 && position.y < vp_bottom {
+                            Some(((position.y - render::LIST_TOP as f64 + self.scroll_offset as f64) / render::ROW_HEIGHT as f64) as usize)
                         } else {
                             None
                         };
@@ -432,6 +530,18 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                         }
                     } else if self.current_view == AppView::Settings {
                         let new_row = render::settings_row_at(position.y as f32);
+                        if new_row != self.hovered_row {
+                            self.hovered_row = new_row;
+                            self.dirty = true;
+                            window.request_redraw();
+                        }
+                    } else if self.current_view == AppView::Chart {
+                        let back_y = render::chart_back_y(size.height) as f64;
+                        let new_row = if position.y >= back_y - 12.0 && position.y < back_y + 8.0 {
+                            Some(0)
+                        } else {
+                            None
+                        };
                         if new_row != self.hovered_row {
                             self.hovered_row = new_row;
                             self.dirty = true;
@@ -472,6 +582,22 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             }
                         }
                     }
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } if self.current_view == AppView::List => {
+                if let Some(window) = &self.window {
+                    let size = window.inner_size();
+                    let viewport_h = (size.height as f32) - render::DONUT_HEIGHT - render::LIST_TOP;
+                    let content_h = self.shared_usage.lock().unwrap().len() as f32 * render::ROW_HEIGHT;
+                    let max_scroll = (content_h - viewport_h).max(0.0);
+                    let delta_y = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * render::ROW_HEIGHT,
+                        winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                    };
+                    self.scroll_target = (self.scroll_target - delta_y).clamp(0.0, max_scroll);
+                    self.dirty = true;
+                    window.request_redraw();
                 }
             }
 
@@ -560,6 +686,35 @@ impl LumenApp {
         let _ = window.set_outer_position(PhysicalPosition::new(new_x, new_y));
     }
 
+    fn refresh_chart_cache(&mut self) {
+        let rows = match self.storage {
+            Some(ref storage) => storage.usage_by_day(7).unwrap_or_default(),
+            None => return,
+        };
+        let today = chrono::Local::now().date_naive();
+        let mut data: Vec<(String, u64)> = Vec::with_capacity(7);
+        for i in (0..7).rev() {
+            let date = today - chrono::Duration::days(i);
+            let date_str = date.format("%Y-%m-%d").to_string();
+            let val = rows
+                .iter()
+                .find(|(d, _)| d == &date_str)
+                .map(|(_, v)| (*v).max(0) as u64)
+                .unwrap_or(0);
+            data.push((date_str, val));
+        }
+        self.chart_cache = data;
+    }
+
+    fn refresh_donut_cache(&mut self) {
+        let usage = self.shared_usage.lock().unwrap().clone();
+        let mut result: Vec<(String, u64)> = usage.into_iter()
+            .map(|app| (app.name.clone(), app.duration_secs))
+            .collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        self.donut_cache = result;
+    }
+
     fn advance_hover(&mut self) {
         let now = Instant::now();
         let dt = self.last_frame.map_or(0.0, |t| (now - t).as_secs_f32());
@@ -587,7 +742,14 @@ impl LumenApp {
             }).collect()
         };
 
-        self.advance_hover();
+        // плавный скролл
+        let diff = self.scroll_target - self.scroll_offset;
+        if diff.abs() > 0.5 {
+            self.scroll_offset += diff * 0.15;
+            self.dirty = true;
+        } else {
+            self.scroll_offset = self.scroll_target;
+        }
 
         // мигание курсора поиска
         if self.search_focused && self.last_cursor_toggle.elapsed() >= Duration::from_millis(500) {
@@ -599,6 +761,9 @@ impl LumenApp {
         if self.hovered_row.map_or(false, |r| r >= usage.len()) {
             self.hovered_row = None;
         }
+
+        // обновляем кэш пончика на каждый редро (реагирует на DataUpdated/тик)
+        self.refresh_donut_cache();
 
         let window = match &self.window {
             Some(w) => w,
@@ -625,12 +790,14 @@ impl LumenApp {
             Some(chrome::HitZone::CloseButton) => render::HoveredTitleButton::Close,
             Some(chrome::HitZone::MinimizeButton) => render::HoveredTitleButton::Minimize,
             Some(chrome::HitZone::SettingsButton) => render::HoveredTitleButton::Settings,
+            Some(chrome::HitZone::ChartButton) => render::HoveredTitleButton::Chart,
             _ => render::HoveredTitleButton::None,
         };
         let show_seconds = self.config.lock().unwrap().show_seconds;
         let idle_threshold_mins = self.config.lock().unwrap().idle_threshold_mins;
         let start_minimized = self.config.lock().unwrap().start_minimized;
-        let pixmap = render::draw_frame(width, height, &render::Theme::default(), &usage, hover, self.hovered_row, self.hover_progress, &search_query, self.search_focused, self.search_cursor_visible, self.current_view, self.autostart_enabled, show_seconds, start_minimized, idle_threshold_mins, self.confirm_clear);
+
+        let pixmap = render::draw_frame(width, height, &render::Theme::default(), &usage, hover, self.hovered_row, self.hover_progress, &search_query, self.search_focused, self.search_cursor_visible, self.current_view, self.autostart_enabled, show_seconds, start_minimized, idle_threshold_mins, self.confirm_clear, &self.chart_cache, self.scroll_offset, &self.donut_cache);
         render::blit_to_softbuffer(&pixmap, &mut *buffer);
         let _ = buffer.present();
     }
