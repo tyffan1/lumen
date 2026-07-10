@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::mpsc::Sender;
 
 use windows::Win32::Foundation::HWND;
@@ -15,6 +15,9 @@ use crate::{ProcessInfo, TrackerEvent, WindowHandle};
 
 thread_local! {
     static TX: RefCell<Option<Sender<TrackerEvent>>> = RefCell::new(None);
+    /// Был ли предыдущий foreground-окно в exclusive fullscreen? 
+    /// Нужно, чтобы корректно отправлять FullscreenExited.
+    static PREV_FULLSCREEN: Cell<bool> = const { Cell::new(false) };
 }
 
 pub struct WindowsForegroundTracker;
@@ -98,11 +101,18 @@ fn emit_window(tx: &Sender<TrackerEvent>, hwnd: HWND) {
         window_handle: Some(WindowHandle(hwnd.0 as usize)),
     };
 
-    if is_exclusive_fullscreen_raw(hwnd) {
-        let _ = tx.send(TrackerEvent::FullscreenEntered(info.clone()));
-    }
+    let is_fs = is_exclusive_fullscreen_raw(hwnd);
+    let was_prev_fs = PREV_FULLSCREEN.with(|c| c.replace(is_fs));
 
-    let _ = tx.send(TrackerEvent::WindowChanged(info));
+    // WindowChanged ДОЛЖЕН быть первым, чтобы агрегатор обновил current
+    // до того, как FullscreenEntered пометит его как fullscreen.
+    let _ = tx.send(TrackerEvent::WindowChanged(info.clone()));
+
+    if is_fs {
+        let _ = tx.send(TrackerEvent::FullscreenEntered(info));
+    } else if was_prev_fs {
+        let _ = tx.send(TrackerEvent::FullscreenExited);
+    }
 }
 
 fn window_title(hwnd: HWND) -> String {
