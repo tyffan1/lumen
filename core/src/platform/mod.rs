@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::TrackerEvent;
 use crate::config::Config;
+#[allow(unused_imports)]
 use crate::traits::ProcessInfoProvider;
 
 // ---------------------------------------------------------------------------

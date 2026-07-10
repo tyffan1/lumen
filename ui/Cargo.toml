@@ -11,4 +11,6 @@ tiny-skia.workspace = true
 fontdue.workspace = true
 anyhow.workspace = true
 windows.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"

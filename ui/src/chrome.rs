@@ -24,27 +24,32 @@ const SEARCH_HEIGHT: f64 = 28.0;
 const PADDING_X: f64 = 16.0;
 const SEARCH_CLEAR_W: f64 = 24.0;
 
-pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64) -> HitZone {
-    // Приоритет: кнопки titlebar → resize края → поиск → drag / client
+pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64, scale: f64) -> HitZone {
+    let th = TITLEBAR_HEIGHT * scale;
+    let bs = BUTTON_SIZE * scale;
+    let rb = RESIZE_BORDER * scale;
+    let sh = SEARCH_HEIGHT * scale;
+    let px = PADDING_X * scale;
+    let scw = SEARCH_CLEAR_W * scale;
 
     // 1. Кнопки на titlebar (имеют приоритет над resize-углами сверху). Три кнопки по 32px.
-    if y <= TITLEBAR_HEIGHT {
-        if x >= window_width - BUTTON_SIZE {
+    if y <= th {
+        if x >= window_width - bs {
             return HitZone::CloseButton;
         }
-        if x >= window_width - BUTTON_SIZE * 2.0 {
+        if x >= window_width - bs * 2.0 {
             return HitZone::MinimizeButton;
         }
-        if x >= window_width - BUTTON_SIZE * 3.0 {
+        if x >= window_width - bs * 3.0 {
             return HitZone::SettingsButton;
         }
     }
 
     // 2. Resize-границы (6px от краёв)
-    let on_left = x <= RESIZE_BORDER;
-    let on_right = x >= window_width - RESIZE_BORDER;
-    let on_top = y <= RESIZE_BORDER;
-    let on_bottom = y >= window_height - RESIZE_BORDER;
+    let on_left = x <= rb;
+    let on_right = x >= window_width - rb;
+    let on_top = y <= rb;
+    let on_bottom = y >= window_height - rb;
 
     if on_bottom && on_left {
         return HitZone::ResizeBottomLeft;
@@ -72,15 +77,15 @@ pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64) -> HitZon
     }
 
     // 3. Поле поиска (под titlebar, над списком). Крестик очистки справа.
-    if y > TITLEBAR_HEIGHT && y <= TITLEBAR_HEIGHT + SEARCH_HEIGHT {
-        if x >= window_width - PADDING_X - SEARCH_CLEAR_W {
+    if y > th && y <= th + sh {
+        if x >= window_width - px - scw {
             return HitZone::SearchClear;
         }
         return HitZone::SearchField;
     }
 
     // 4. Drag titlebar (между кнопками и левым краем, не в resize-зоне)
-    if y <= TITLEBAR_HEIGHT {
+    if y <= th {
         return HitZone::Titlebar;
     }
 

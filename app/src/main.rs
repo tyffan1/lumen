@@ -110,10 +110,19 @@ fn run_aggregator(
                 TrackerEvent::WindowChanged(info) => {
                     last_foreground = Some(info.clone());
                     if !info.exe_path.is_empty() && !icon_cache.contains_key(&info.exe_name) {
+                        eprintln!("[icon] -> exe_path=\"{}\", window_handle={:?}",
+                            info.exe_path, info.window_handle);
                         let icon = extract_exe_icon(&info.exe_path)
-                            .or_else(|| info.window_handle.as_ref().and_then(extract_icon_by_window));
+                            .or_else(|| {
+                                eprintln!("[icon] -> extract_exe_icon returned None, trying extract_icon_by_window");
+                                info.window_handle.as_ref().and_then(extract_icon_by_window)
+                            });
                         if let Some(icon) = icon {
+                            eprintln!("[icon] -> icon obtained: {}x{} rgba_len={}",
+                                icon.width, icon.height, icon.rgba.len());
                             icon_cache.insert(info.exe_name.clone(), icon);
+                        } else {
+                            eprintln!("[icon] -> BOTH extractors returned None — will show placeholder");
                         }
                     }
                     if !is_idle {
@@ -231,10 +240,14 @@ fn build_usage_list(
     use chrono::Utc;
 
     let attach_icon = |name: &str| -> (Option<Vec<u8>>, u32, u32) {
-        icon_cache
+        let result = icon_cache
             .get(name)
             .map(|icon| (Some(icon.rgba.clone()), icon.width, icon.height))
-            .unwrap_or((None, 0, 0))
+            .unwrap_or((None, 0, 0));
+        if result.0.is_none() {
+            eprintln!("[icon] attach_icon(\"{}\") -> cache MISS (placeholder)", name);
+        }
+        result
     };
 
     let mut usage: Vec<AppUsage> = totals

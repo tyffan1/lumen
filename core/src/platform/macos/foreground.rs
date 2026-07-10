@@ -1,42 +1,40 @@
-use std::cell::RefCell;
 use std::sync::mpsc::Sender;
+use std::sync::Mutex;
 
-use objc2::class;
-use objc2::declare::ClassType;
-use objc2::{declare_class, msg_send, msg_send_id, sel};
+use objc2::{define_class, msg_send, sel, ClassType, MainThreadOnly};
 use objc2::rc::Retained;
 use objc2::runtime::NSObject;
+use objc2_foundation::{NSNotification, NSObjectProtocol};
+use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 
 use crate::{ProcessInfo, TrackerEvent, WindowHandle};
 
-thread_local! {
-    static TX: RefCell<Option<Sender<TrackerEvent>>> = RefCell::new(None);
+static TX: Mutex<Option<Sender<TrackerEvent>>> = Mutex::new(None);
+
+#[derive(Default)]
+struct ForegroundObserverIvars {
+    // No ivars needed
 }
 
-declare_class!(
+define_class!(
+    // SAFETY: NSObject doesn't have subclassing requirements; ForegroundObserver doesn't implement Drop.
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ForegroundObserverIvars]
     struct ForegroundObserver;
 
-    unsafe impl ClassType for ForegroundObserver {
-        type Super = NSObject;
-        type Mutability = objc2::mutability::IsRetained;
-    }
+    // SAFETY: NSObjectProtocol has no safety requirements
+    unsafe impl NSObjectProtocol for ForegroundObserver {}
 
-    extern "C" {
-        #[sel(applicationActivated:)]
-        fn application_activated(&self, notification: &NSObject);
+    impl ForegroundObserver {
+        #[unsafe(method(applicationActivated:))]
+        fn application_activated(&self, notification: &NSNotification) {
+            if let Some(tx) = TX.lock().unwrap().as_ref() {
+                emit_from_notification(tx, notification);
+            }
+        }
     }
 );
-
-extern "C" fn ForegroundObserver_application_activated(
-    _this: &ForegroundObserver,
-    notification: &NSObject,
-) {
-    TX.with(|cell| {
-        if let Some(tx) = cell.borrow().as_ref() {
-            emit_from_notification(tx, notification);
-        }
-    });
-}
 
 fn nsstring_to_string(s: &NSObject) -> String {
     unsafe {
@@ -50,7 +48,7 @@ fn nsstring_to_string(s: &NSObject) -> String {
     }
 }
 
-fn emit_from_notification(tx: &Sender<TrackerEvent>, notification: &NSObject) {
+fn emit_from_notification(tx: &Sender<TrackerEvent>, notification: &NSNotification) {
     unsafe {
         let user_info: *mut NSObject = msg_send![notification, userInfo];
         if user_info.is_null() {
@@ -65,7 +63,7 @@ fn emit_from_notification(tx: &Sender<TrackerEvent>, notification: &NSObject) {
         }
 
         let app: *mut NSObject =
-            msg_send![user_info, objectForKey: *NSWorkspaceApplicationKey];
+            msg_send![user_info, objectForKey: &*NSWorkspaceApplicationKey];
         if app.is_null() {
             return;
         }
@@ -98,7 +96,7 @@ fn emit_from_notification(tx: &Sender<TrackerEvent>, notification: &NSObject) {
 
         let info = ProcessInfo {
             pid: pid as u32,
-            exe_name,
+            exe_name: exe_name.clone(),
             exe_path,
             window_title,
             window_handle: Some(WindowHandle(pid as usize)),
@@ -114,11 +112,10 @@ fn emit_from_notification(tx: &Sender<TrackerEvent>, notification: &NSObject) {
 
 fn emit_current_foreground(tx: &Sender<TrackerEvent>) {
     unsafe {
-        let workspace: Retained<NSObject> =
-            msg_send_id![class!(NSWorkspace), sharedWorkspace];
-        let workspace = &*workspace as *const NSObject as *mut NSObject;
+        let workspace: Retained<NSWorkspace> = NSWorkspace::sharedWorkspace();
 
-        let app: *mut NSObject = msg_send![&*workspace, frontmostApplication];
+        let app: Retained<NSRunningApplication> = msg_send![&*workspace, frontmostApplication];
+        let app = Retained::as_ptr(&app) as *mut NSObject;
         if app.is_null() {
             return;
         }
@@ -169,17 +166,15 @@ pub struct MacOsForegroundTracker;
 
 impl crate::ForegroundTracker for MacOsForegroundTracker {
     fn run(self, tx: Sender<TrackerEvent>) {
-        TX.with(|cell| *cell.borrow_mut() = Some(tx.clone()));
+        *TX.lock().unwrap() = Some(tx.clone());
 
         emit_current_foreground(&tx);
 
         unsafe {
             let observer: Retained<ForegroundObserver> =
-                msg_send_id![ForegroundObserver::class(), new];
+                msg_send![ForegroundObserver::class(), new];
 
-            let workspace: Retained<NSObject> =
-                msg_send_id![class!(NSWorkspace), sharedWorkspace];
-            let workspace = &*workspace as *const NSObject as *mut NSObject;
+            let workspace: Retained<NSWorkspace> = NSWorkspace::sharedWorkspace();
 
             let notification_center: *mut NSObject =
                 msg_send![&*workspace, notificationCenter];

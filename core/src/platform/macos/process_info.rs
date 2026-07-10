@@ -1,17 +1,19 @@
 use std::os::raw::c_void;
 
-use objc2::class;
 use objc2::rc::Retained;
 use objc2::runtime::NSObject;
-use objc2::{msg_send, msg_send_id};
+use objc2::{msg_send, class};
 
-use crate::{AppIcon, ProcessInfoProvider, WindowHandle};
+use objc2_app_kit::{NSGraphicsContext, NSWorkspace};
+use objc2_foundation::{NSDictionary, NSRect, NSPoint, NSSize};
+
+use crate::{AppIcon, WindowHandle};
 
 // ===========================================================================
 // FFI helper: CFStringCreateWithBytes (CoreFoundation)
 // ===========================================================================
 
-const kCFStringEncodingUTF8: u32 = 0x08000100;
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 
 type CFStringRef = *const c_void;
 
@@ -38,7 +40,7 @@ fn cfstring_from_str(s: &str) -> CFStringRef {
             std::ptr::null(),
             s.as_ptr(),
             s.len() as isize,
-            kCFStringEncodingUTF8,
+            K_CF_STRING_ENCODING_UTF8,
             0,
         )
     }
@@ -82,6 +84,10 @@ extern "C" {
     ) -> CGContextRef;
     fn CGBitmapContextGetData(ctx: CGContextRef) -> *mut c_void;
     fn CGContextDrawImage(ctx: CGContextRef, rect: CGRect, image: CGImageRef);
+    fn CGContextRelease(ctx: CGContextRef);
+    fn CGColorSpaceRelease(space: CGColorSpaceRef);
+    fn CGImageGetWidth(image: CGImageRef) -> usize;
+    fn CGImageGetHeight(image: CGImageRef) -> usize;
 }
 
 // ===========================================================================
@@ -91,7 +97,7 @@ extern "C" {
 type AXUIElementRef = *mut c_void;
 type AXError = i32;
 
-const kAXErrorSuccess: AXError = 0;
+const K_AXERROR_SUCCESS: AXError = 0;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -107,6 +113,7 @@ extern "C" {
 // NSString → String
 // ===========================================================================
 
+#[allow(dead_code)]
 fn nsstring_to_string(s: &NSObject) -> String {
     unsafe {
         let cstr: *const i8 = msg_send![s, UTF8String];
@@ -122,7 +129,7 @@ fn nsstring_to_string(s: &NSObject) -> String {
 fn cfstring_to_string_lossy(cf: CFStringRef) -> String {
     unsafe {
         let mut buf = [0i8; 4096];
-        let ok = CFStringGetCString(cf, buf.as_mut_ptr(), buf.len() as isize, kCFStringEncodingUTF8);
+        let ok = CFStringGetCString(cf, buf.as_mut_ptr(), buf.len() as isize, K_CF_STRING_ENCODING_UTF8);
         if ok == 0 {
             return String::new();
         }
@@ -141,18 +148,17 @@ fn cfstring_to_string_lossy(cf: CFStringRef) -> String {
 // exe_name_by_pid
 // ===========================================================================
 
+#[allow(dead_code)]
 pub fn exe_name_by_pid(pid: u32) -> Option<String> {
     unsafe {
-        let apps: Retained<NSObject> = msg_send_id![
+        let app: *mut NSObject = msg_send![
             class!(NSRunningApplication),
-            runningApplicationsWithProcessIdentifier: pid as i32
+            runningApplicationWithProcessIdentifier: pid as i32
         ];
-        let count: usize = msg_send![&*apps, count];
-        if count == 0 {
+        if app.is_null() {
             return None;
         }
-        let app: *mut NSObject = msg_send![&*apps, objectAtIndex: 0usize];
-        let name: *mut NSObject = msg_send![&*app, localizedName];
+        let name: *mut NSObject = msg_send![app, localizedName];
         if name.is_null() {
             return None;
         }
@@ -164,22 +170,21 @@ pub fn exe_name_by_pid(pid: u32) -> Option<String> {
 // exe_full_path_by_pid
 // ===========================================================================
 
+#[allow(dead_code)]
 pub fn exe_full_path_by_pid(pid: u32) -> Option<String> {
     unsafe {
-        let apps: Retained<NSObject> = msg_send_id![
+        let app: *mut NSObject = msg_send![
             class!(NSRunningApplication),
-            runningApplicationsWithProcessIdentifier: pid as i32
+            runningApplicationWithProcessIdentifier: pid as i32
         ];
-        let count: usize = msg_send![&*apps, count];
-        if count == 0 {
+        if app.is_null() {
             return None;
         }
-        let app: *mut NSObject = msg_send![&*apps, objectAtIndex: 0usize];
-        let url: *mut NSObject = msg_send![&*app, bundleURL];
+        let url: *mut NSObject = msg_send![app, bundleURL];
         if url.is_null() {
             return None;
         }
-        let path_obj: *mut NSObject = msg_send![&*url, path];
+        let path_obj: *mut NSObject = msg_send![url, path];
         if path_obj.is_null() {
             return None;
         }
@@ -209,7 +214,7 @@ pub(crate) fn window_title_for_pid(pid: i32) -> String {
         CFRelease(app as *const c_void);
         CFRelease(focused_attr as *const c_void);
 
-        if err != kAXErrorSuccess || focused.is_null() {
+        if err != K_AXERROR_SUCCESS || focused.is_null() {
             return String::new();
         }
 
@@ -224,7 +229,7 @@ pub(crate) fn window_title_for_pid(pid: i32) -> String {
         CFRelease(focused);
         CFRelease(title_attr as *const c_void);
 
-        if err != kAXErrorSuccess || title.is_null() {
+        if err != K_AXERROR_SUCCESS || title.is_null() {
             return String::new();
         }
 
@@ -234,50 +239,65 @@ pub(crate) fn window_title_for_pid(pid: i32) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn window_title(handle: &WindowHandle) -> String {
     let pid = handle.0 as i32;
     window_title_for_pid(pid)
 }
 
 // ===========================================================================
-// NSImage → RGBA
+// NSImage → RGBA (с даунскейлом через Core Graphics)
 // ===========================================================================
 
 fn nsimage_to_rgba(ns_image: &NSObject) -> Option<AppIcon> {
     unsafe {
-        let cg_image: CGImageRef = msg_send![
+        let mut proposed_rect = NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize { width: 0.0, height: 0.0 },
+        };
+        let cg_image: *mut c_void = msg_send![
             ns_image,
-            CGImageForProposedRect: std::ptr::null_mut::<CGRect>()
-                context: std::ptr::null_mut::<c_void>()
-                hints: std::ptr::null_mut::<c_void>()
+            CGImageForProposedRect: &mut proposed_rect,
+            context: std::ptr::null_mut::<NSGraphicsContext>(),
+            hints: std::ptr::null_mut::<NSDictionary>()
         ];
         if cg_image.is_null() {
             return None;
         }
 
-        let width: usize = msg_send![cg_image, width];
-        let height: usize = msg_send![cg_image, height];
-        if width == 0 || height == 0 || width > 512 || height > 512 {
+        let src_w = CGImageGetWidth(cg_image);
+        let src_h = CGImageGetHeight(cg_image);
+        if src_w == 0 || src_h == 0 {
             return None;
         }
+        if src_w > 4096 || src_h > 4096 {
+            return None;
+        }
+
+        const TARGET: usize = 64;
+        let (tw, th) = if src_w > TARGET || src_h > TARGET {
+            (TARGET, TARGET)
+        } else {
+            (src_w, src_h)
+        };
 
         let color_space = CGColorSpaceCreateDeviceRGB();
         if color_space.is_null() {
             return None;
         }
 
-        let bpr = width * 4;
+        let bpr = tw * 4;
+        let bitmap_info: u32 = 0x4001;
         let ctx = CGBitmapContextCreate(
             std::ptr::null_mut(),
-            width,
-            height,
+            tw,
+            th,
             8,
             bpr,
             color_space,
-            0x00020002, // kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+            bitmap_info,
         );
-        CFRelease(color_space as *const c_void);
-
+        CGColorSpaceRelease(color_space);
         if ctx.is_null() {
             return None;
         }
@@ -285,26 +305,25 @@ fn nsimage_to_rgba(ns_image: &NSObject) -> Option<AppIcon> {
         let rect = CGRect {
             origin: CGPoint { x: 0.0, y: 0.0 },
             size: CGSize {
-                width: width as f64,
-                height: height as f64,
+                width: tw as f64,
+                height: th as f64,
             },
         };
         CGContextDrawImage(ctx, rect, cg_image);
 
         let data = CGBitmapContextGetData(ctx);
         if data.is_null() {
-            CFRelease(ctx as *const c_void);
+            CGContextRelease(ctx);
             return None;
         }
 
-        let total = width * height * 4;
+        let total = tw * th * 4;
         let mut rgba = Vec::with_capacity(total);
         std::ptr::copy_nonoverlapping(data as *const u8, rgba.as_mut_ptr(), total);
         rgba.set_len(total);
 
-        CFRelease(ctx as *const c_void);
+        CGContextRelease(ctx);
 
-        // Un-premultiply alpha (CG stores premultiplied)
         for chunk in rgba.chunks_exact_mut(4) {
             let a = chunk[3] as u16;
             if a > 0 && a < 255 {
@@ -317,8 +336,8 @@ fn nsimage_to_rgba(ns_image: &NSObject) -> Option<AppIcon> {
 
         Some(AppIcon {
             rgba,
-            width: width as u32,
-            height: height as u32,
+            width: tw as u32,
+            height: th as u32,
         })
     }
 }
@@ -327,13 +346,14 @@ fn nsimage_to_rgba(ns_image: &NSObject) -> Option<AppIcon> {
 // extract_exe_icon (path-based)
 // ===========================================================================
 
+#[allow(dead_code)]
 pub fn extract_exe_icon(exe_path: &str) -> Option<AppIcon> {
     unsafe {
-        let workspace: Retained<NSObject> =
-            msg_send_id![class!(NSWorkspace), sharedWorkspace];
+        let workspace: Retained<NSWorkspace> = NSWorkspace::sharedWorkspace();
 
+        let path_cstring = std::ffi::CString::new(exe_path).ok()?;
         let path_ns: *mut NSObject =
-            msg_send_id![class!(NSString), stringWithUTF8String: exe_path.as_ptr() as *const i8];
+            msg_send![class!(NSString), stringWithUTF8String: path_cstring.as_ptr()];
         if path_ns.is_null() {
             return None;
         }
@@ -351,19 +371,18 @@ pub fn extract_exe_icon(exe_path: &str) -> Option<AppIcon> {
 // extract_icon_by_window (window-handle-based)
 // ===========================================================================
 
+#[allow(dead_code)]
 pub fn extract_icon_by_window(handle: &WindowHandle) -> Option<AppIcon> {
     let pid = handle.0 as i32;
     unsafe {
-        let apps: Retained<NSObject> = msg_send_id![
+        let app: *mut NSObject = msg_send![
             class!(NSRunningApplication),
-            runningApplicationsWithProcessIdentifier: pid
+            runningApplicationWithProcessIdentifier: pid
         ];
-        let count: usize = msg_send![&*apps, count];
-        if count == 0 {
+        if app.is_null() {
             return None;
         }
-        let app: *mut NSObject = msg_send![&*apps, objectAtIndex: 0usize];
-        let icon: *mut NSObject = msg_send![&*app, icon];
+        let icon: *mut NSObject = msg_send![app, icon];
         if icon.is_null() {
             return None;
         }
@@ -378,7 +397,7 @@ pub fn extract_icon_by_window(handle: &WindowHandle) -> Option<AppIcon> {
 #[allow(dead_code)]
 pub struct MacOsProcessInfoProvider;
 
-impl ProcessInfoProvider for MacOsProcessInfoProvider {
+impl crate::traits::ProcessInfoProvider for MacOsProcessInfoProvider {
     fn exe_name_by_pid(pid: u32) -> Option<String> {
         exe_name_by_pid(pid)
     }

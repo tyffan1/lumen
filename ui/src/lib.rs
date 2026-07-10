@@ -112,33 +112,115 @@ impl LumenApp {
     }
 
     fn read_autostart() -> bool {
-        use winreg::enums::*;
-        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-            .open_subkey_with_flags(
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                KEY_READ,
-            )
-            .ok()
-            .and_then(|k| k.get_value::<String, _>("Lumen").ok())
-            .is_some()
+        #[cfg(target_os = "windows")]
+        {
+            use winreg::enums::*;
+            winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+                .open_subkey_with_flags(
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    KEY_READ,
+                )
+                .ok()
+                .and_then(|k| k.get_value::<String, _>("Lumen").ok())
+                .is_some()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join("Library/LaunchAgents/com.lumenapp.Lumen.plist"))
+                .map_or(false, |p| p.exists())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::xdg_config_home()
+                .join("autostart")
+                .join("lumen.desktop")
+                .exists()
+        }
     }
 
     fn write_autostart(enabled: bool) {
-        use winreg::enums::*;
-        if let Ok(run) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-            .open_subkey_with_flags(
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                KEY_SET_VALUE,
-            )
+        #[cfg(target_os = "windows")]
         {
-            if enabled {
-                if let Ok(exe) = std::env::current_exe() {
-                    let _ = run.set_value("Lumen", &exe.to_string_lossy().as_ref());
+            use winreg::enums::*;
+            if let Ok(run) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+                .open_subkey_with_flags(
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    KEY_SET_VALUE,
+                )
+            {
+                if enabled {
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = run.set_value("Lumen", &exe.to_string_lossy().as_ref());
+                    }
+                } else {
+                    let _ = run.delete_value("Lumen");
                 }
-            } else {
-                let _ = run.delete_value("Lumen");
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            let home = match std::env::var("HOME").ok() {
+                Some(h) => std::path::PathBuf::from(h),
+                None => return,
+            };
+            let plist_path = home.join("Library/LaunchAgents/com.lumenapp.Lumen.plist");
+            if enabled {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::fs::create_dir_all(plist_path.parent().unwrap());
+                    let plist = format!(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lumenapp.Lumen</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+                        exe.to_string_lossy()
+                    );
+                    let _ = std::fs::write(&plist_path, plist);
+                }
+            } else {
+                let _ = std::fs::remove_file(&plist_path);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let desktop_path = Self::xdg_config_home().join("autostart").join("lumen.desktop");
+            if enabled {
+                if let Some(exe) = std::env::current_exe() {
+                    let _ = std::fs::create_dir_all(desktop_path.parent().unwrap());
+                    let desktop = format!(
+                        "[Desktop Entry]\nType=Application\nName=Lumen\nExec={}\nTerminal=false\n",
+                        exe.to_string_lossy()
+                    );
+                    let _ = std::fs::write(&desktop_path, desktop);
+                }
+            } else {
+                let _ = std::fs::remove_file(&desktop_path);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn xdg_config_home() -> std::path::PathBuf {
+        std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| std::path::PathBuf::from(h).join(".config"))
+                    .unwrap_or_default()
+            })
     }
 
     fn request_redraw_if_dirty(&mut self) {
@@ -236,6 +318,11 @@ impl ApplicationHandler<UserEvent> for LumenApp {
             self.window_visible = true;
         }
         self.mark_dirty();
+        
+        // Explicitly request initial redraw
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -281,9 +368,10 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                 let Some(window) = &self.window else { return };
                 let (cx, cy) = self.last_cursor_pos;
                 let size = window.inner_size();
+                let scale = window.scale_factor();
                 match state {
                     ElementState::Pressed => {
-                        match chrome::hit_test(cx, cy, size.width as f64, size.height as f64) {
+                        match chrome::hit_test(cx, cy, size.width as f64, size.height as f64, scale) {
                             chrome::HitZone::CloseButton => {
                                 self.window_visible = false;
                                 window.set_visible(false);
@@ -324,7 +412,7 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             chrome::HitZone::ResizeBottomLeft => { let _ = window.drag_resize_window(ResizeDirection::SouthWest); }
                             chrome::HitZone::ResizeBottomRight => { let _ = window.drag_resize_window(ResizeDirection::SouthEast); }
                             chrome::HitZone::Client if self.current_view == AppView::Settings => {
-                                if let Some(row) = render::settings_row_at(cy as f32) {
+                                if let Some(row) = render::settings_row_at(cy as f32, scale as f32) {
                                     match row {
                                         0 => {
                                             self.autostart_enabled = !self.autostart_enabled;
@@ -338,8 +426,8 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                                             self.dirty = true;
                                         }
                                         2 => {
-                                            let (minus_cx, plus_cx) = render::settings_idle_button_positions(size.width);
-                                            let hit_radius = 15.0;
+                                            let (minus_cx, plus_cx) = render::settings_idle_button_positions(size.width, scale as f32);
+                                            let hit_radius = 15.0 * scale;
                                             let mut cfg = self.config.lock().unwrap();
                                             if (cx - minus_cx as f64).abs() < hit_radius {
                                                 if cfg.idle_threshold_mins > 1 {
@@ -361,7 +449,7 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                                         }
                                         4 => {
                                             if self.confirm_clear {
-                                                let (yes_zone, no_zone) = render::settings_confirm_areas(size.width);
+                                                let (yes_zone, no_zone) = render::settings_confirm_areas(size.width, scale as f32);
                                                 if cx >= yes_zone.0 as f64 && cx < yes_zone.1 as f64 {
                                                     self.clear_history_flag.store(true, Ordering::Relaxed);
                                                     self.confirm_clear = false;
@@ -409,7 +497,8 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                 }
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
-                    let zone = chrome::hit_test(position.x, position.y, size.width as f64, size.height as f64);
+                    let scale = window.scale_factor();
+                    let zone = chrome::hit_test(position.x, position.y, size.width as f64, size.height as f64, scale);
                     let new_hover = match zone {
                         chrome::HitZone::CloseButton | chrome::HitZone::MinimizeButton | chrome::HitZone::SettingsButton => Some(zone),
                         _ => None,
@@ -420,8 +509,8 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                         window.request_redraw();
                     }
                     if self.current_view == AppView::List {
-                        let new_row = if position.y > 68.0 {
-                            Some(((position.y - 68.0) / 56.0) as usize)
+                        let new_row = if position.y > 68.0 * scale {
+                            Some(((position.y - 68.0 * scale) / (56.0 * scale)) as usize)
                         } else {
                             None
                         };
@@ -431,7 +520,7 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             window.request_redraw();
                         }
                     } else if self.current_view == AppView::Settings {
-                        let new_row = render::settings_row_at(position.y as f32);
+                        let new_row = render::settings_row_at(position.y as f32, scale as f32);
                         if new_row != self.hovered_row {
                             self.hovered_row = new_row;
                             self.dirty = true;
@@ -529,7 +618,8 @@ impl LumenApp {
         };
 
         let (cx, cy) = self.last_cursor_pos;
-        let zone = chrome::hit_test(cx, cy, size.width as f64, size.height as f64);
+        let scale = window.scale_factor();
+        let zone = chrome::hit_test(cx, cy, size.width as f64, size.height as f64, scale);
 
         if zone != chrome::HitZone::Titlebar {
             return;
@@ -612,6 +702,7 @@ impl LumenApp {
         let size = window.inner_size();
         let width = size.width;
         let height = size.height;
+        let scale_factor = window.scale_factor() as f32;
         if width == 0 || height == 0 {
             return;
         }
@@ -630,7 +721,7 @@ impl LumenApp {
         let show_seconds = self.config.lock().unwrap().show_seconds;
         let idle_threshold_mins = self.config.lock().unwrap().idle_threshold_mins;
         let start_minimized = self.config.lock().unwrap().start_minimized;
-        let pixmap = render::draw_frame(width, height, &render::Theme::default(), &usage, hover, self.hovered_row, self.hover_progress, &search_query, self.search_focused, self.search_cursor_visible, self.current_view, self.autostart_enabled, show_seconds, start_minimized, idle_threshold_mins, self.confirm_clear);
+        let pixmap = render::draw_frame(width, height, scale_factor, &render::Theme::default(), &usage, hover, self.hovered_row, self.hover_progress, &search_query, self.search_focused, self.search_cursor_visible, self.current_view, self.autostart_enabled, show_seconds, start_minimized, idle_threshold_mins, self.confirm_clear);
         render::blit_to_softbuffer(&pixmap, &mut *buffer);
         let _ = buffer.present();
     }
