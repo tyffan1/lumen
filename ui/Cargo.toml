@@ -13,4 +13,10 @@ fontdue.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
 windows.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true

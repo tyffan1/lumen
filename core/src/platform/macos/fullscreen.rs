@@ -9,11 +9,11 @@ type CFBooleanRef = *const c_void;
 type CFStringRef = *const c_void;
 type AXError = i32;
 
-const kAXErrorSuccess: AXError = 0;
-const kAXErrorAttributeUnsupported: AXError = -25206;
-const kAXErrorNoValue: AXError = -25208;
+const K_AXERROR_SUCCESS: AXError = 0;
+const K_AXERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25206;
+const K_AXERROR_NO_VALUE: AXError = -25208;
 
-const kCFStringEncodingUTF8: u32 = 0x08000100;
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -25,7 +25,6 @@ extern "C" {
     ) -> AXError;
 }
 
-// CoreFoundation — уже залинкована системой
 extern "C" {
     fn CFRelease(cf: *const c_void);
     fn CFBooleanGetValue(boolean: CFBooleanRef) -> u8;
@@ -58,13 +57,13 @@ fn cfstring_from_str(s: &str) -> CFStringRef {
             std::ptr::null(),
             s.as_ptr(),
             s.len() as isize,
-            kCFStringEncodingUTF8,
+            K_CF_STRING_ENCODING_UTF8,
             0,
         )
     }
 }
 
-pub(crate) fn is_fullscreen_for_pid(pid: i32) -> bool {
+pub fn is_fullscreen_for_pid(pid: i32) -> bool {
     let app = unsafe { AXUIElementCreateApplication(pid) };
     if app.is_null() {
         return false;
@@ -87,7 +86,7 @@ pub(crate) fn is_fullscreen_for_pid(pid: i32) -> bool {
     }
 
     match err {
-        kAXErrorSuccess => {
+        K_AXERROR_SUCCESS => {
             if value.is_null() {
                 return false;
             }
@@ -97,7 +96,7 @@ pub(crate) fn is_fullscreen_for_pid(pid: i32) -> bool {
             }
             is_fullscreen
         }
-        kAXErrorAttributeUnsupported | kAXErrorNoValue => false,
+        K_AXERROR_ATTRIBUTE_UNSUPPORTED | K_AXERROR_NO_VALUE => false,
         _ => {
             ax_log_warning_once();
             false

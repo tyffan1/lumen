@@ -13,7 +13,6 @@ pub use traits::{ForegroundTracker, IdleDetector, FullscreenDetector, ProcessInf
 pub use idle::IdleWatcher;
 
 // Платформозависимые функции — re-export через #[cfg].
-#[cfg(target_os = "windows")]
 pub use config::Config;
 pub use platform::extract_exe_icon;
 pub use platform::extract_icon_by_window;

@@ -1308,7 +1308,6 @@ dependencies = [
  "chrono",
  "fontdue",
  "lumen-core",
- "lumen-storage",
  "softbuffer",
  "tiny-skia",
  "windows",

@@ -137,33 +137,115 @@ impl LumenApp {
     }
 
     fn read_autostart() -> bool {
-        use winreg::enums::*;
-        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-            .open_subkey_with_flags(
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                KEY_READ,
-            )
-            .ok()
-            .and_then(|k| k.get_value::<String, _>("Lumen").ok())
-            .is_some()
+        #[cfg(target_os = "windows")]
+        {
+            use winreg::enums::*;
+            winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+                .open_subkey_with_flags(
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    KEY_READ,
+                )
+                .ok()
+                .and_then(|k| k.get_value::<String, _>("Lumen").ok())
+                .is_some()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join("Library/LaunchAgents/com.lumenapp.Lumen.plist"))
+                .map_or(false, |p| p.exists())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::xdg_config_home()
+                .join("autostart")
+                .join("lumen.desktop")
+                .exists()
+        }
     }
 
     fn write_autostart(enabled: bool) {
-        use winreg::enums::*;
-        if let Ok(run) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-            .open_subkey_with_flags(
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                KEY_SET_VALUE,
-            )
+        #[cfg(target_os = "windows")]
         {
-            if enabled {
-                if let Ok(exe) = std::env::current_exe() {
-                    let _ = run.set_value("Lumen", &exe.to_string_lossy().as_ref());
+            use winreg::enums::*;
+            if let Ok(run) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+                .open_subkey_with_flags(
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    KEY_SET_VALUE,
+                )
+            {
+                if enabled {
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = run.set_value("Lumen", &exe.to_string_lossy().as_ref());
+                    }
+                } else {
+                    let _ = run.delete_value("Lumen");
                 }
-            } else {
-                let _ = run.delete_value("Lumen");
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            let home = match std::env::var("HOME").ok() {
+                Some(h) => std::path::PathBuf::from(h),
+                None => return,
+            };
+            let plist_path = home.join("Library/LaunchAgents/com.lumenapp.Lumen.plist");
+            if enabled {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::fs::create_dir_all(plist_path.parent().unwrap());
+                    let plist = format!(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lumenapp.Lumen</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+                        exe.to_string_lossy()
+                    );
+                    let _ = std::fs::write(&plist_path, plist);
+                }
+            } else {
+                let _ = std::fs::remove_file(&plist_path);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let desktop_path = Self::xdg_config_home().join("autostart").join("lumen.desktop");
+            if enabled {
+                if let Some(exe) = std::env::current_exe() {
+                    let _ = std::fs::create_dir_all(desktop_path.parent().unwrap());
+                    let desktop = format!(
+                        "[Desktop Entry]\nType=Application\nName=Lumen\nExec={}\nTerminal=false\n",
+                        exe.to_string_lossy()
+                    );
+                    let _ = std::fs::write(&desktop_path, desktop);
+                }
+            } else {
+                let _ = std::fs::remove_file(&desktop_path);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn xdg_config_home() -> std::path::PathBuf {
+        std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| std::path::PathBuf::from(h).join(".config"))
+                    .unwrap_or_default()
+            })
     }
 
     fn request_redraw_if_dirty(&mut self) {
@@ -219,11 +301,54 @@ impl ApplicationHandler<UserEvent> for LumenApp {
 
         let attrs = WindowAttributes::default()
             .with_title("Lumen")
-            .with_decorations(false)
             .with_inner_size(winit::dpi::LogicalSize::new(500.0, 600.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(280.0, 200.0));
+        #[cfg(target_os = "macos")]
+        let attrs = attrs.with_decorations(true);
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_decorations(false);
 
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+
+        // macOS: нативные traffic-light кнопки, скруглённые углы, тонкая обводка
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use objc2::{msg_send, class};
+            use objc2::runtime::NSObject;
+            use std::os::raw::c_void;
+
+            if let Ok(handle) = window.window_handle() {
+                if let RawWindowHandle::AppKit(ns) = handle.as_ref() {
+                    let ns_view = ns.ns_view.as_ptr() as *mut NSObject;
+                    unsafe {
+                        let ns_window: *mut NSObject = msg_send![ns_view, window];
+
+                        // fullSizeContentView — контент под titlebar
+                        let style_mask: u64 = msg_send![ns_window, styleMask];
+                        let _: () = msg_send![ns_window, setStyleMask: style_mask | (1 << 15)];
+
+                        // Прозрачный titlebar, скрытый заголовок
+                        let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
+                        let _: () = msg_send![ns_window, setTitleVisibility: 1];
+
+                        // Скруглённые углы и маска на contentView.layer
+                        let content_view: *mut NSObject = msg_send![ns_window, contentView];
+                        let _: () = msg_send![content_view, setWantsLayer: true];
+                        let layer: *mut NSObject = msg_send![content_view, layer];
+                        let _: () = msg_send![layer, setCornerRadius: 10.0];
+                        let _: () = msg_send![layer, setMasksToBounds: true];
+                        let _: () = msg_send![layer, setBorderWidth: 0.5];
+
+                        // Цвет обводки: светло-серый полупрозрачный
+                        let border_ns: *mut NSObject =
+                            msg_send![class!(NSColor), colorWithWhite: 1.0_f64, alpha: 0.15_f64];
+                        let border_cg: *mut c_void = msg_send![border_ns, CGColor];
+                        let _: () = msg_send![layer, setBorderColor: border_cg];
+                    }
+                }
+            }
+        }
 
         // Windows 11+: скруглённые углы окна. На Win10 тихо ignored.
         #[cfg(windows)]
@@ -268,6 +393,11 @@ impl ApplicationHandler<UserEvent> for LumenApp {
         }
 
         self.mark_dirty();
+        
+        // Explicitly request initial redraw
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -313,9 +443,10 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                 let Some(window) = &self.window else { return };
                 let (cx, cy) = self.last_cursor_pos;
                 let size = window.inner_size();
+                let scale = window.scale_factor();
                 match state {
                     ElementState::Pressed => {
-                        match chrome::hit_test(cx, cy, size.width as f64, size.height as f64) {
+                        match chrome::hit_test(cx, cy, size.width as f64, size.height as f64, scale) {
                             chrome::HitZone::CloseButton => {
                                 self.window_visible = false;
                                 window.set_visible(false);
@@ -376,7 +507,7 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                                 }
                             }
                             chrome::HitZone::Client if self.current_view == AppView::Settings => {
-                                if let Some(row) = render::settings_row_at(cy as f32) {
+                                if let Some(row) = render::settings_row_at(cy as f32, scale as f32) {
                                     match row {
                                         0 => {
                                             self.autostart_enabled = !self.autostart_enabled;
@@ -390,8 +521,8 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                                             self.dirty = true;
                                         }
                                         2 => {
-                                            let (minus_cx, plus_cx) = render::settings_idle_button_positions(size.width);
-                                            let hit_radius = 15.0;
+                                            let (minus_cx, plus_cx) = render::settings_idle_button_positions(size.width, scale as f32);
+                                            let hit_radius = 15.0 * scale;
                                             let mut cfg = self.config.lock().unwrap();
                                             if (cx - minus_cx as f64).abs() < hit_radius {
                                                 if cfg.idle_threshold_mins > 1 {
@@ -413,7 +544,7 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                                         }
                                         4 => {
                                             if self.confirm_clear {
-                                                let (yes_zone, no_zone) = render::settings_confirm_areas(size.width);
+                                                let (yes_zone, no_zone) = render::settings_confirm_areas(size.width, scale as f32);
                                                 if cx >= yes_zone.0 as f64 && cx < yes_zone.1 as f64 {
                                                     self.clear_history_flag.store(true, Ordering::Relaxed);
                                                     self.confirm_clear = false;
@@ -443,20 +574,21 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                                 }
                             }
                             _ if self.current_view == AppView::List
-                                && (cx as f32) >= render::scrollbar_x(size.width)
-                                && (cx as f32) <= render::scrollbar_x(size.width) + render::SCROLLBAR_W
-                                && (cy as f32) >= render::LIST_TOP
-                                && (cy as f32) <= (size.height as f32) - render::DONUT_HEIGHT =>
+                                && (cx as f32) >= render::scrollbar_x(size.width, scale as f32)
+                                && (cx as f32) <= render::scrollbar_x(size.width, scale as f32) + render::SCROLLBAR_W * scale as f32
+                                && (cy as f32) >= render::list_top(scale as f32)
+                                && (cy as f32) <= (size.height as f32) - render::DONUT_HEIGHT * scale as f32 =>
                             {
-                                let vp_bottom = (size.height as f32) - render::DONUT_HEIGHT;
-                                let vp_h = vp_bottom - render::LIST_TOP;
+                                let lt = render::list_top(scale as f32);
+                                let vp_bottom = (size.height as f32) - render::DONUT_HEIGHT * scale as f32;
+                                let vp_h = vp_bottom - lt;
                                 let usage_len = self.shared_usage.lock().unwrap().len();
-                                let content_h = usage_len as f32 * render::ROW_HEIGHT;
+                                let content_h = usage_len as f32 * render::ROW_HEIGHT * scale as f32;
                                 if content_h > vp_h {
                                     let max_scroll = content_h - vp_h;
                                     let track_h = vp_h;
-                                    let thumb_h = (vp_h / content_h * track_h).max(12.0);
-                                    let click_ratio = ((cy as f32 - render::LIST_TOP) - thumb_h / 2.0) / (track_h - thumb_h);
+                                    let thumb_h = (vp_h / content_h * track_h).max(12.0 * scale as f32);
+                                    let click_ratio = ((cy as f32 - lt) - thumb_h / 2.0) / (track_h - thumb_h);
                                     self.scroll_target = (click_ratio * max_scroll).clamp(0.0, max_scroll);
                                 }
                                 self.scroll_dragging = true;
@@ -487,14 +619,16 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                 if self.scroll_dragging {
                     if let Some(window) = &self.window {
                         let size = window.inner_size();
-                        let vp_bottom = (size.height as f32) - render::DONUT_HEIGHT;
-                        let vp_h = vp_bottom - render::LIST_TOP;
+                        let scale = window.scale_factor();
+                        let lt = render::list_top(scale as f32);
+                        let vp_bottom = (size.height as f32) - render::DONUT_HEIGHT * scale as f32;
+                        let vp_h = vp_bottom - lt;
                         let usage_len = self.shared_usage.lock().unwrap().len();
-                        let content_h = usage_len as f32 * render::ROW_HEIGHT;
+                        let content_h = usage_len as f32 * render::ROW_HEIGHT * scale as f32;
                         if content_h > vp_h {
                             let max_scroll = content_h - vp_h;
                             let track_h = vp_h;
-                            let thumb_h = (vp_h / content_h * track_h).max(12.0);
+                            let thumb_h = (vp_h / content_h * track_h).max(12.0 * scale as f32);
                             let dy = position.y - self.scroll_drag_start_y;
                             let ratio = dy as f32 / (track_h - thumb_h);
                             let new_offset = (self.scroll_drag_start_offset + ratio * max_scroll).clamp(0.0, max_scroll);
@@ -506,7 +640,8 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                 }
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
-                    let zone = chrome::hit_test(position.x, position.y, size.width as f64, size.height as f64);
+                    let scale = window.scale_factor();
+                    let zone = chrome::hit_test(position.x, position.y, size.width as f64, size.height as f64, scale);
                     let new_hover = match zone {
                         chrome::HitZone::CloseButton | chrome::HitZone::MinimizeButton | chrome::HitZone::SettingsButton | chrome::HitZone::ChartButton => Some(zone),
                         _ => None,
@@ -517,9 +652,10 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                         window.request_redraw();
                     }
                     if self.current_view == AppView::List {
+                        let lt = render::list_top(scale as f32) as f64;
                         let vp_bottom = (size.height as f32 - render::DONUT_HEIGHT) as f64;
-                        let new_row = if position.y > render::LIST_TOP as f64 && position.y < vp_bottom {
-                            Some(((position.y - render::LIST_TOP as f64 + self.scroll_offset as f64) / render::ROW_HEIGHT as f64) as usize)
+                        let new_row = if position.y > lt && position.y < vp_bottom {
+                            Some(((position.y - lt + self.scroll_offset as f64) / (render::ROW_HEIGHT * scale as f32) as f64) as usize)
                         } else {
                             None
                         };
@@ -529,15 +665,15 @@ impl ApplicationHandler<UserEvent> for LumenApp {
                             window.request_redraw();
                         }
                     } else if self.current_view == AppView::Settings {
-                        let new_row = render::settings_row_at(position.y as f32);
+                        let new_row = render::settings_row_at(position.y as f32, scale as f32);
                         if new_row != self.hovered_row {
                             self.hovered_row = new_row;
                             self.dirty = true;
                             window.request_redraw();
                         }
                     } else if self.current_view == AppView::Chart {
-                        let back_y = render::chart_back_y(size.height) as f64;
-                        let new_row = if position.y >= back_y - 12.0 && position.y < back_y + 8.0 {
+                        let back_y = render::chart_back_y(size.height, scale as f32) as f64;
+                        let new_row = if position.y >= back_y - 12.0 * scale && position.y < back_y + 8.0 * scale {
                             Some(0)
                         } else {
                             None
@@ -588,11 +724,13 @@ impl ApplicationHandler<UserEvent> for LumenApp {
             WindowEvent::MouseWheel { delta, .. } if self.current_view == AppView::List => {
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
-                    let viewport_h = (size.height as f32) - render::DONUT_HEIGHT - render::LIST_TOP;
-                    let content_h = self.shared_usage.lock().unwrap().len() as f32 * render::ROW_HEIGHT;
+                    let scale = window.scale_factor();
+                    let rh = render::ROW_HEIGHT * scale as f32;
+                    let viewport_h = (size.height as f32) - render::DONUT_HEIGHT * scale as f32 - render::list_top(scale as f32);
+                    let content_h = self.shared_usage.lock().unwrap().len() as f32 * rh;
                     let max_scroll = (content_h - viewport_h).max(0.0);
                     let delta_y = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * render::ROW_HEIGHT,
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * rh,
                         winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
                     };
                     self.scroll_target = (self.scroll_target - delta_y).clamp(0.0, max_scroll);
@@ -655,7 +793,8 @@ impl LumenApp {
         };
 
         let (cx, cy) = self.last_cursor_pos;
-        let zone = chrome::hit_test(cx, cy, size.width as f64, size.height as f64);
+        let scale = window.scale_factor();
+        let zone = chrome::hit_test(cx, cy, size.width as f64, size.height as f64, scale);
 
         if zone != chrome::HitZone::Titlebar {
             return;
@@ -777,6 +916,7 @@ impl LumenApp {
         let size = window.inner_size();
         let width = size.width;
         let height = size.height;
+        let scale_factor = window.scale_factor() as f32;
         if width == 0 || height == 0 {
             return;
         }
@@ -796,8 +936,15 @@ impl LumenApp {
         let show_seconds = self.config.lock().unwrap().show_seconds;
         let idle_threshold_mins = self.config.lock().unwrap().idle_threshold_mins;
         let start_minimized = self.config.lock().unwrap().start_minimized;
-
-        let pixmap = render::draw_frame(width, height, &render::Theme::default(), &usage, hover, self.hovered_row, self.hover_progress, &search_query, self.search_focused, self.search_cursor_visible, self.current_view, self.autostart_enabled, show_seconds, start_minimized, idle_threshold_mins, self.confirm_clear, &self.chart_cache, self.scroll_offset, &self.donut_cache);
+        let pixmap = render::draw_frame(
+            width, height, scale_factor,
+            &render::Theme::default(), &usage, hover,
+            self.hovered_row, self.hover_progress,
+            &search_query, self.search_focused, self.search_cursor_visible,
+            self.current_view, self.autostart_enabled, show_seconds,
+            start_minimized, idle_threshold_mins, self.confirm_clear,
+            &self.chart_cache, self.scroll_offset, &self.donut_cache,
+        );
         render::blit_to_softbuffer(&pixmap, &mut *buffer);
         let _ = buffer.present();
     }

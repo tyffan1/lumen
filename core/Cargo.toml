@@ -17,6 +17,6 @@ libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
-objc2-foundation.workspace = true
-objc2-app-kit.workspace = true
+objc2-foundation = { workspace = true, features = ["NSNotification", "NSObject", "NSString", "NSURL", "NSDictionary", "NSGeometry"] }
+objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSImage", "NSGraphicsContext"] }
 libc.workspace = true
