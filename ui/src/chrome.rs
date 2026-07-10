@@ -33,6 +33,7 @@ pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64, scale: f6
     let scw = SEARCH_CLEAR_W * scale;
 
     // 1. Кнопки на titlebar (имеют приоритет над resize-углами сверху). Три кнопки по 32px.
+    #[cfg(not(target_os = "macos"))]
     if y <= th {
         if x >= window_width - bs {
             return HitZone::CloseButton;
@@ -43,6 +44,12 @@ pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64, scale: f6
         if x >= window_width - bs * 3.0 {
             return HitZone::SettingsButton;
         }
+    }
+
+    // macOS: только кнопка настроек (шестерёнка) в правом верхнем углу
+    #[cfg(target_os = "macos")]
+    if y <= th && x >= window_width - bs {
+        return HitZone::SettingsButton;
     }
 
     // 2. Resize-границы (6px от краёв)

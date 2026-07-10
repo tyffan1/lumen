@@ -275,11 +275,54 @@ impl ApplicationHandler<UserEvent> for LumenApp {
 
         let attrs = WindowAttributes::default()
             .with_title("Lumen")
-            .with_decorations(false)
             .with_inner_size(winit::dpi::LogicalSize::new(500.0, 600.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(280.0, 200.0));
+        #[cfg(target_os = "macos")]
+        let attrs = attrs.with_decorations(true);
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_decorations(false);
 
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+
+        // macOS: нативные traffic-light кнопки, скруглённые углы, тонкая обводка
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use objc2::{msg_send, class};
+            use objc2::runtime::NSObject;
+            use std::os::raw::c_void;
+
+            if let Ok(handle) = window.window_handle() {
+                if let RawWindowHandle::AppKit(ns) = handle.as_ref() {
+                    let ns_view = ns.ns_view.as_ptr() as *mut NSObject;
+                    unsafe {
+                        let ns_window: *mut NSObject = msg_send![ns_view, window];
+
+                        // fullSizeContentView — контент под titlebar
+                        let style_mask: u64 = msg_send![ns_window, styleMask];
+                        let _: () = msg_send![ns_window, setStyleMask: style_mask | (1 << 15)];
+
+                        // Прозрачный titlebar, скрытый заголовок
+                        let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
+                        let _: () = msg_send![ns_window, setTitleVisibility: 1];
+
+                        // Скруглённые углы и маска на contentView.layer
+                        let content_view: *mut NSObject = msg_send![ns_window, contentView];
+                        let _: () = msg_send![content_view, setWantsLayer: true];
+                        let layer: *mut NSObject = msg_send![content_view, layer];
+                        let _: () = msg_send![layer, setCornerRadius: 10.0];
+                        let _: () = msg_send![layer, setMasksToBounds: true];
+                        let _: () = msg_send![layer, setBorderWidth: 0.5];
+
+                        // Цвет обводки: светло-серый полупрозрачный
+                        let border_ns: *mut NSObject =
+                            msg_send![class!(NSColor), colorWithWhite: 1.0_f64, alpha: 0.15_f64];
+                        let border_cg: *mut c_void = msg_send![border_ns, CGColor];
+                        let _: () = msg_send![layer, setBorderColor: border_cg];
+                    }
+                }
+            }
+        }
 
         // Windows 11+: скруглённые углы окна. На Win10 тихо ignored.
         #[cfg(windows)]

@@ -69,7 +69,7 @@ const ICON_SIZE: f32 = 20.0;
 const ICON_GAP: f32 = 8.0;
 const INDICATOR_W: f32 = 2.0;
 
-pub fn draw_frame(width: u32, height: u32, scale: f32, theme: &Theme, usage: &[AppUsage], button_hover: HoveredTitleButton, hovered_row: Option<usize>, hover_intensity: f32, search_query: &str, search_focused: bool, cursor_visible: bool, view: AppView, autostart: bool, show_seconds: bool, start_minimized: bool, idle_threshold_mins: u32, confirm_clear: bool) -> Pixmap {
+pub fn draw_frame(width: u32, height: u32, scale: f32, theme: &Theme, usage: &[AppUsage], _button_hover: HoveredTitleButton, hovered_row: Option<usize>, hover_intensity: f32, search_query: &str, search_focused: bool, cursor_visible: bool, view: AppView, autostart: bool, show_seconds: bool, start_minimized: bool, idle_threshold_mins: u32, confirm_clear: bool) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).expect("pixmap alloc");
 
     let mut paint_bg = Paint::default();
@@ -81,7 +81,10 @@ pub fn draw_frame(width: u32, height: u32, scale: f32, theme: &Theme, usage: &[A
         None,
     );
 
-    draw_titlebar_buttons(&mut pixmap, width, scale, theme, button_hover);
+    #[cfg(not(target_os = "macos"))]
+    draw_titlebar_buttons(&mut pixmap, width, scale, theme, _button_hover);
+    #[cfg(target_os = "macos")]
+    draw_settings_icon(&mut pixmap, width, scale, theme, _button_hover);
 
     let font_reg = font();
     let font_bld = font_bold();
@@ -94,9 +97,15 @@ pub fn draw_frame(width: u32, height: u32, scale: f32, theme: &Theme, usage: &[A
     // суммарное время слева в titlebar
     if let Some(f) = font_reg {
         let total_secs: u64 = usage.iter().map(|a| a.duration_secs).sum();
+
+        #[cfg(target_os = "macos")]
+        let time_x = (75.0 * scale).max(px);
+        #[cfg(not(target_os = "macos"))]
+        let time_x = px;
+
         let base = text_baseline(0.0, th, f, fsd)
             .unwrap_or(th / 2.0 + fsd * 0.35);
-        draw_text(&mut pixmap, &fmt_duration(total_secs, false), px, base, f, fsd, theme.text_dim);
+        draw_text(&mut pixmap, &fmt_duration(total_secs, false), time_x, base, f, fsd, theme.text_dim);
     }
 
     let mut paint_sep = Paint::default();
@@ -548,6 +557,59 @@ fn draw_settings_back_row(pixmap: &mut Pixmap, _width: u32, theme: &Theme, font:
     draw_text(pixmap, "←  Back", PADDING_X * scale, text_base, font, fs, theme.text_dim);
 }
 
+#[cfg(target_os = "macos")]
+fn draw_settings_icon(pixmap: &mut Pixmap, width: u32, scale: f32, theme: &Theme, hover: HoveredTitleButton) {
+    let btn_size = 32.0 * scale;
+    let x0 = width as f32 - btn_size;
+
+    // фон при наведении
+    if matches!(hover, HoveredTitleButton::Settings) {
+        let mut bg = Paint::default();
+        bg.set_color(Color::from_rgba8(255, 255, 255, 20));
+        bg.anti_alias = true;
+        pixmap.fill_rect(
+            Rect::from_xywh(x0, 0.0, btn_size, btn_size).unwrap(),
+            &bg,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    let cx = x0 + btn_size / 2.0;
+    let cy = btn_size / 2.0;
+    let r = 4.0 * scale;
+    let spoke_len = 2.5 * scale;
+
+    let mut paint = Paint::default();
+    paint.set_color(theme.text_dim);
+    paint.anti_alias = true;
+
+    // окружность
+    let mut circ = tiny_skia::PathBuilder::new();
+    circ.push_circle(cx, cy, r);
+    if let Some(p) = circ.finish() {
+        let mut stroke = tiny_skia::Stroke::default();
+        stroke.width = 1.0 * scale;
+        pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+    }
+
+    // спицы
+    let mut path = tiny_skia::PathBuilder::new();
+    for angle_deg in [0.0, 90.0, 180.0, 270.0] {
+        let rad = angle_deg * std::f32::consts::PI / 180.0;
+        let (dx, dy) = (rad.cos(), rad.sin());
+        path.move_to(cx + r * dx, cy + r * dy);
+        path.line_to(cx + (r + spoke_len) * dx, cy + (r + spoke_len) * dy);
+    }
+    if let Some(p) = path.finish() {
+        let mut stroke = tiny_skia::Stroke::default();
+        stroke.width = 1.0 * scale;
+        stroke.line_cap = tiny_skia::LineCap::Round;
+        pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, scale: f32, theme: &Theme, hover: HoveredTitleButton) {
     let btn_size = 32.0 * scale;
     let x2 = width as f32 - btn_size;       // close
