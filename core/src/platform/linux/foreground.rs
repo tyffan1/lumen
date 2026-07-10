@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::mpsc::Sender;
 
 use x11rb::connection::Connection;
@@ -8,6 +9,10 @@ use x11rb::protocol::xproto::{
 use super::fullscreen::is_fullscreen_raw;
 use super::process_info::{exe_full_path_by_pid, exe_name_by_pid};
 use crate::{ProcessInfo, TrackerEvent, WindowHandle};
+
+thread_local! {
+    static PREV_FULLSCREEN: Cell<bool> = const { Cell::new(false) };
+}
 
 x11rb::atom_manager! {
     Atoms: AtomCollection {
@@ -82,11 +87,16 @@ fn emit_current(conn: &impl Connection, root: Window, atoms: &Atoms, tx: &Sender
         window_handle: Some(WindowHandle(active as usize)),
     };
 
-    if is_fullscreen_raw(conn, active, atoms.net_wm_state, atoms.net_wm_state_fullscreen) {
-        let _ = tx.send(TrackerEvent::FullscreenEntered(info.clone()));
-    }
+    let is_fs = is_fullscreen_raw(conn, active, atoms.net_wm_state, atoms.net_wm_state_fullscreen);
+    let was_prev_fs = PREV_FULLSCREEN.with(|c| c.replace(is_fs));
 
-    let _ = tx.send(TrackerEvent::WindowChanged(info));
+    let _ = tx.send(TrackerEvent::WindowChanged(info.clone()));
+
+    if is_fs {
+        let _ = tx.send(TrackerEvent::FullscreenEntered(info));
+    } else if was_prev_fs {
+        let _ = tx.send(TrackerEvent::FullscreenExited);
+    }
 }
 
 fn get_active_window(conn: &impl Connection, root: Window, atoms: &Atoms) -> Option<Window> {
