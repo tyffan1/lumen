@@ -35,6 +35,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "screensaver"] }
 libc = "0.2"
 
+# macOS
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+
 
 windows = { version = "0.58", features = [
     "Win32_Foundation",
