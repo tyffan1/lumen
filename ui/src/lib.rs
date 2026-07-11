@@ -854,22 +854,11 @@ impl LumenApp {
         self.donut_cache = result;
     }
 
-    fn advance_hover(&mut self) {
+    fn redraw(&mut self) {
         let now = Instant::now();
-        let dt = self.last_frame.map_or(0.0, |t| (now - t).as_secs_f32());
+        let dt = self.last_frame.map_or(0.016, |t| (now - t).as_secs_f32());
         self.last_frame = Some(now);
 
-        let target = if self.hovered_row.is_some() { 1.0 } else { 0.0 };
-        let speed = 1.0 / 0.150; // полный переход за 150ms
-
-        if self.hover_progress < target {
-            self.hover_progress = (self.hover_progress + dt * speed).min(1.0);
-        } else if self.hover_progress > target {
-            self.hover_progress = (self.hover_progress - dt * speed).max(0.0);
-        }
-    }
-
-    fn redraw(&mut self) {
         let search_query = self.search_query.clone();
         let usage = self.shared_usage.lock().unwrap().clone();
         let usage: Vec<AppUsage> = if search_query.is_empty() {
@@ -881,10 +870,20 @@ impl LumenApp {
             }).collect()
         };
 
-        // плавный скролл
+        // hover анимация (плавное появление/исчезание подсветки строки)
+        let hover_target = if self.hovered_row.is_some() { 1.0 } else { 0.0 };
+        let hover_speed = 1.0 / 0.150;
+        if self.hover_progress < hover_target {
+            self.hover_progress = (self.hover_progress + dt * hover_speed).min(1.0);
+        } else if self.hover_progress > hover_target {
+            self.hover_progress = (self.hover_progress - dt * hover_speed).max(0.0);
+        }
+
+        // плавный скролл (экспоненциальное догоняние)
         let diff = self.scroll_target - self.scroll_offset;
         if diff.abs() > 0.5 {
-            self.scroll_offset += diff * 0.15;
+            let scroll_speed = 12.0;
+            self.scroll_offset += diff * (1.0 - (-dt * scroll_speed).exp());
             self.dirty = true;
         } else {
             self.scroll_offset = self.scroll_target;

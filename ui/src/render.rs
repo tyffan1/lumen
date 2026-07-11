@@ -68,13 +68,13 @@ pub fn list_top(scale: f32) -> f32 {
 }
 
 pub fn scrollbar_x(width: u32, scale: f32) -> f32 {
-    width as f32 - 14.0 * scale
+    width as f32 - 20.0 * scale
 }
 const FONT_SIZE: f32 = 14.0;
 const FONT_SIZE_DUR: f32 = 12.0;
 const BAR_HEIGHT: f32 = 2.0;
 const PADDING_X: f32 = 16.0;
-const ICON_SIZE: f32 = 20.0;
+const ICON_SIZE: f32 = 26.0;
 const ICON_GAP: f32 = 8.0;
 const INDICATOR_W: f32 = 2.0;
 
@@ -106,19 +106,6 @@ pub fn draw_frame(
     let font_bld = font_bold();
 
     let th = (TITLEBAR_HEIGHT * scale).round();
-    let fsd = FONT_SIZE_DUR * scale;
-    let px = PADDING_X * scale;
-
-    // суммарное время слева в titlebar
-    if let Some(f) = font_reg {
-        let total_secs: u64 = usage.iter().map(|a| a.duration_secs).sum();
-        #[cfg(target_os = "macos")]
-        let time_x = (75.0 * scale).max(px);
-        #[cfg(not(target_os = "macos"))]
-        let time_x = px;
-        let base = text_baseline(0.0, th, f, fsd).unwrap_or(th / 2.0 + fsd * 0.35);
-        draw_text(&mut pixmap, &fmt_duration(total_secs, false), time_x, base, f, fsd, theme.text_dim);
-    }
 
     let mut paint_sep = Paint::default();
     paint_sep.set_color(theme.separator);
@@ -841,8 +828,9 @@ fn draw_titlebar_buttons_macos(pixmap: &mut Pixmap, width: u32, scale: f32, them
     let mut paint = Paint::default();
     paint.set_color(theme.text_dim);
     paint.anti_alias = true;
-    draw_gear_icon(pixmap, x0, btn_size, &paint, scale);
-    draw_chart_icon(pixmap, x1, btn_size, &paint);
+    // x0 (left) — chart (статистика), x1 (right) — gear (настройки)
+    draw_chart_icon(pixmap, x0, btn_size, &paint);
+    draw_gear_icon(pixmap, x1, btn_size, &paint, scale);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -910,14 +898,14 @@ fn draw_titlebar_buttons(pixmap: &mut Pixmap, width: u32, scale: f32, theme: &Th
 fn draw_gear_icon(pixmap: &mut Pixmap, x0: f32, btn_size: f32, paint: &Paint, scale: f32) {
     let cx = x0 + btn_size / 2.0;
     let cy = btn_size / 2.0;
-    let r = 4.0 * scale;
-    let spoke_len = 2.5 * scale;
+    let r = 5.0 * scale;
+    let spoke_len = 3.0 * scale;
 
     let mut circ = tiny_skia::PathBuilder::new();
     circ.push_circle(cx, cy, r);
     if let Some(p) = circ.finish() {
         let mut stroke = tiny_skia::Stroke::default();
-        stroke.width = 1.0 * scale;
+        stroke.width = 1.5 * scale;
         pixmap.stroke_path(&p, paint, &stroke, Transform::identity(), None);
     }
     let mut path = tiny_skia::PathBuilder::new();
@@ -929,7 +917,7 @@ fn draw_gear_icon(pixmap: &mut Pixmap, x0: f32, btn_size: f32, paint: &Paint, sc
     }
     if let Some(p) = path.finish() {
         let mut stroke = tiny_skia::Stroke::default();
-        stroke.width = 1.0 * scale;
+        stroke.width = 1.5 * scale;
         stroke.line_cap = tiny_skia::LineCap::Round;
         pixmap.stroke_path(&p, paint, &stroke, Transform::identity(), None);
     }
@@ -937,10 +925,10 @@ fn draw_gear_icon(pixmap: &mut Pixmap, x0: f32, btn_size: f32, paint: &Paint, sc
 
 fn draw_chart_icon(pixmap: &mut Pixmap, x0: f32, btn_size: f32, paint: &Paint) {
     let cx = x0 + btn_size / 2.0;
-    let cy = btn_size / 2.0 + 2.0;
-    let bar_w = 2.0;
-    let bar_gap = 2.0;
-    let heights = [5.0, 10.0, 7.0];
+    let cy = btn_size / 2.0;
+    let bar_w = 4.0;
+    let bar_gap = 4.0;
+    let heights = [12.0, 22.0, 16.0];
     let starts_x = cx - (bar_w * 3.0 + bar_gap * 2.0) / 2.0;
     for (i, &h) in heights.iter().enumerate() {
         let bx = starts_x + i as f32 * (bar_w + bar_gap);

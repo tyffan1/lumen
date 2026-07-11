@@ -20,7 +20,7 @@ pub enum HitZone {
 
 const TITLEBAR_HEIGHT: f64 = 32.0;
 const BUTTON_SIZE: f64 = 32.0;
-const RESIZE_BORDER: f64 = 6.0;
+const RESIZE_BORDER: f64 = 4.0;
 const SEARCH_HEIGHT: f64 = 28.0;
 const PADDING_X: f64 = 16.0;
 const SEARCH_CLEAR_W: f64 = 24.0;
@@ -50,10 +50,15 @@ pub fn hit_test(x: f64, y: f64, window_width: f64, window_height: f64, scale: f6
         }
     }
 
-    // macOS: только кнопка настроек (шестерёнка) в правом верхнем углу
+    // macOS: навигационные кнопки справа — Settings (правая), Chart (левее)
     #[cfg(target_os = "macos")]
-    if y <= th && x >= window_width - bs {
-        return HitZone::SettingsButton;
+    if y <= th {
+        if x >= window_width - bs {
+            return HitZone::SettingsButton;
+        }
+        if x >= window_width - bs * 2.0 {
+            return HitZone::ChartButton;
+        }
     }
 
     // 2. Resize-границы (6px от краёв)

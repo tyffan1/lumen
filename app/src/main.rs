@@ -108,34 +108,19 @@ fn run_aggregator(
         if let Some(event) = event {
             match event {
                 TrackerEvent::WindowChanged(info) => {
-                    eprintln!("[lumen] FG: {:>12} (pid={}) \"{}\" @ {}",
-                        info.exe_name, info.pid, info.window_title,
-                        chrono::Local::now().format("%H:%M:%S%.3f"),
-                    );
                     last_foreground = Some(info.clone());
                     if !info.exe_path.is_empty() && !icon_cache.contains_key(&info.exe_name) {
-                        eprintln!("[icon] -> exe_path=\"{}\", window_handle={:?}",
-                            info.exe_path, info.window_handle);
                         let icon = extract_exe_icon(&info.exe_path)
                             .or_else(|| {
-                                eprintln!("[icon] -> extract_exe_icon returned None, trying extract_icon_by_window");
                                 info.window_handle.as_ref().and_then(extract_icon_by_window)
                             });
                         if let Some(icon) = icon {
-                            eprintln!("[icon] -> icon obtained: {}x{} rgba_len={}",
-                                icon.width, icon.height, icon.rgba.len());
                             icon_cache.insert(info.exe_name.clone(), icon);
-                        } else {
-                            eprintln!("[icon] -> BOTH extractors returned None — will show placeholder");
                         }
                     }
                     if !is_idle {
-                        if let Some((prev_info, started_at, was_fs)) = current.take() {
+                        if let Some((prev_info, started_at, _was_fs)) = current.take() {
                             let dur = (Utc::now() - started_at).num_seconds().max(0) as u64;
-                            if dur > 0 {
-                                eprintln!("[lumen] CLOSE {} +{:.1}s (fullscreen={}) → {}",
-                                    prev_info.exe_name, dur as f64, was_fs, info.exe_name);
-                            }
                             *totals.entry(prev_info.exe_name.clone()).or_insert(0) += dur;
                             storage.queue(Session {
                                 exe_name: prev_info.exe_name,
@@ -150,22 +135,18 @@ fn run_aggregator(
                     send_update = true;
                 }
                 TrackerEvent::FullscreenEntered(_) => {
-                    eprintln!("[lumen] FS_ENTER → current={:?}", 
-                        current.as_ref().map(|c| &c.0.exe_name));
                     if let Some((_, _, was_fullscreen)) = &mut current {
                         *was_fullscreen = true;
                     }
                     send_update = true;
                 }
                 TrackerEvent::FullscreenExited => {
-                    eprintln!("[lumen] FS_EXIT");
                     if let Some((_, _, was_fullscreen)) = &mut current {
                         *was_fullscreen = false;
                     }
                     send_update = true;
                 }
                 TrackerEvent::IdleStarted => {
-                    eprintln!("[lumen] IDLE_STARTED");
                     if !is_idle {
                         is_idle = true;
                         if let Some((prev_info, started_at, was_fullscreen)) = current.take() {
@@ -183,8 +164,6 @@ fn run_aggregator(
                     }
                 }
                 TrackerEvent::IdleEnded => {
-                    eprintln!("[lumen] IDLE_END → restore={}", 
-                        last_foreground.as_ref().map(|i| &i.exe_name).unwrap_or(&"?".to_string()));
                     if is_idle {
                         is_idle = false;
                         if let Some(info) = &last_foreground {
@@ -258,9 +237,6 @@ fn build_usage_list(
             .get(name)
             .map(|icon| (Some(icon.rgba.clone()), icon.width, icon.height))
             .unwrap_or((None, 0, 0));
-        if result.0.is_none() {
-            eprintln!("[icon] attach_icon(\"{}\") -> cache MISS (placeholder)", name);
-        }
         result
     };
 
