@@ -74,6 +74,9 @@ const FONT_SIZE: f32 = 14.0;
 const FONT_SIZE_DUR: f32 = 12.0;
 const BAR_HEIGHT: f32 = 2.0;
 const PADDING_X: f32 = 16.0;
+#[cfg(target_os = "windows")]
+const ICON_SIZE: f32 = 22.0;
+#[cfg(not(target_os = "windows"))]
 const ICON_SIZE: f32 = 26.0;
 const ICON_GAP: f32 = 8.0;
 const INDICATOR_W: f32 = 2.0;
@@ -115,12 +118,31 @@ pub fn draw_frame(
     );
 
     match view {
-        AppView::List => draw_list_content(
-            &mut pixmap, width, height, theme, usage,
-            hovered_row, hover_intensity, font_reg, font_bld,
-            search_query, search_focused, cursor_visible, show_seconds,
-            scroll_offset, donut_data, scale,
-        ),
+        AppView::List => {
+            draw_list_content(
+                &mut pixmap, width, height, theme, usage,
+                hovered_row, hover_intensity, font_reg, font_bld,
+                search_query, search_focused, cursor_visible, show_seconds,
+                scroll_offset, donut_data, scale,
+            );
+            // зачистка titlebar — контент списка мог залезть выше th
+            let mut tb = Paint::default();
+            tb.set_color(theme.background);
+            pixmap.fill_rect(
+                Rect::from_xywh(0.0, 0.0, width as f32, th).unwrap(),
+                &tb, Transform::identity(), None,
+            );
+            #[cfg(target_os = "macos")]
+            draw_titlebar_buttons_macos(&mut pixmap, width, scale, theme, button_hover);
+            #[cfg(not(target_os = "macos"))]
+            draw_titlebar_buttons(&mut pixmap, width, scale, theme, button_hover);
+            let mut ps = Paint::default();
+            ps.set_color(theme.separator);
+            pixmap.fill_rect(
+                Rect::from_xywh(0.0, th, width as f32, 1.0).unwrap(),
+                &ps, Transform::identity(), None,
+            );
+        }
         AppView::Settings => draw_settings(
             &mut pixmap, width, height, theme, font_reg,
             autostart, show_seconds, start_minimized, idle_threshold_mins,
@@ -163,6 +185,7 @@ fn draw_list_content(
 
     for i in first_row..usage.len() {
         if y >= viewport_bottom { break; }
+        if y + rh <= lt { y += rh; continue; }
         let row_alpha = ((viewport_bottom - y) / fade_zone).clamp(0.0, 1.0);
         let app = &usage[i];
 
@@ -251,8 +274,39 @@ fn draw_list_content(
             );
         }
 
+        let top_alpha = ((y - lt) / fade_zone + 1.0).clamp(0.0, 1.0);
+        if top_alpha < 1.0 {
+            let a = ((1.0 - top_alpha) * 180.0) as u8;
+            let mut dim = Paint::default();
+            dim.set_color(Color::from_rgba8(0, 0, 0, a));
+            let dy = y.max(th + 1.0);
+            let dh = rh - (dy - y);
+            if dh > 0.0 {
+                pixmap.fill_rect(
+                    Rect::from_xywh(0.0, dy, width as f32, dh).unwrap(),
+                    &dim, Transform::identity(), None,
+                );
+            }
+        }
+
         y += rh;
     }
+
+    // search-фон — перекрывает контент строк, заходящий выше lt
+    let mut sbg = Paint::default();
+    sbg.set_color(theme.background);
+    pixmap.fill_rect(
+        Rect::from_xywh(0.0, th, width as f32, lt - th).unwrap(),
+        &sbg, Transform::identity(), None,
+    );
+
+    // восстановить titlebar-разделитель (перекрыт заливкой фона выше)
+    let mut sep = Paint::default();
+    sep.set_color(theme.separator);
+    pixmap.fill_rect(
+        Rect::from_xywh(0.0, th, width as f32, 1.0).unwrap(),
+        &sep, Transform::identity(), None,
+    );
 
     // поле поиска (поверх списка)
     let search_y = th;
@@ -926,14 +980,33 @@ fn draw_gear_icon(pixmap: &mut Pixmap, x0: f32, btn_size: f32, paint: &Paint, sc
 fn draw_chart_icon(pixmap: &mut Pixmap, x0: f32, btn_size: f32, paint: &Paint) {
     let cx = x0 + btn_size / 2.0;
     let cy = btn_size / 2.0;
-    let bar_w = 4.0;
-    let bar_gap = 4.0;
-    let heights = [12.0, 22.0, 16.0];
-    let starts_x = cx - (bar_w * 3.0 + bar_gap * 2.0) / 2.0;
-    for (i, &h) in heights.iter().enumerate() {
-        let bx = starts_x + i as f32 * (bar_w + bar_gap);
-        let by = cy + 8.0 - h;
-        pixmap.fill_rect(Rect::from_xywh(bx, by, bar_w, h).unwrap(), paint, Transform::identity(), None);
+
+    #[cfg(target_os = "windows")]
+    {
+        let bar_w = 3.0;
+        let bar_gap = 3.0;
+        let heights = [9.0, 16.0, 12.0];
+        let origin_offset = 6.0;
+        let starts_x = cx - (bar_w * 3.0 + bar_gap * 2.0) / 2.0;
+        for (i, &h) in heights.iter().enumerate() {
+            let bx = starts_x + i as f32 * (bar_w + bar_gap);
+            let by = cy + origin_offset - h;
+            pixmap.fill_rect(Rect::from_xywh(bx, by, bar_w, h).unwrap(), paint, Transform::identity(), None);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let bar_w = 4.0;
+        let bar_gap = 4.0;
+        let heights = [12.0, 22.0, 16.0];
+        let origin_offset = 8.0;
+        let starts_x = cx - (bar_w * 3.0 + bar_gap * 2.0) / 2.0;
+        for (i, &h) in heights.iter().enumerate() {
+            let bx = starts_x + i as f32 * (bar_w + bar_gap);
+            let by = cy + origin_offset - h;
+            pixmap.fill_rect(Rect::from_xywh(bx, by, bar_w, h).unwrap(), paint, Transform::identity(), None);
+        }
     }
 }
 
