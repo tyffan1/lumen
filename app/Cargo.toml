@@ -11,6 +11,16 @@ path = "src/main.rs"
 [package.metadata.winres]
 OriginalFilename = "lumen.exe"
 
+# macOS .app бандл (cargo bundle --release)
+[package.metadata.bundle]
+name = "Lumen"
+identifier = "com.lumenapp.Lumen"
+icon = ["icons/lumen.icns"]
+category = "Utilities"
+minimum_system_version = "11.0"
+short_description = "Screen-time tracker"
+# Без LSUIElement — полноценное GUI-приложение с иконкой в Dock.
+
 [dependencies]
 lumen-core.workspace = true
 lumen-storage.workspace = true

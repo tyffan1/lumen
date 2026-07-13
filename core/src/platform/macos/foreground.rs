@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 
@@ -10,6 +11,31 @@ use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use crate::{ProcessInfo, TrackerEvent, WindowHandle};
 
 static TX: Mutex<Option<Sender<TrackerEvent>>> = Mutex::new(None);
+
+/// true, когда последним активным приложением был loginwindow (экран блокировки).
+static LOGINWINDOW_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Проверяет, является ли имя процесса loginwindow (регистронезависимо).
+fn is_loginwindow(name: &str) -> bool {
+    name.eq_ignore_ascii_case("loginwindow")
+}
+
+/// Обрабатывает событие активации loginwindow.
+/// Возвращает true, если событие поглощено (loginwindow) и не требует WindowChanged.
+fn handle_loginwindow(tx: &Sender<TrackerEvent>, exe_name: &str) -> bool {
+    if is_loginwindow(exe_name) {
+        if !LOGINWINDOW_ACTIVE.swap(true, Ordering::Relaxed) {
+            let _ = tx.send(TrackerEvent::IdleStarted);
+        }
+        return true;
+    }
+
+    if LOGINWINDOW_ACTIVE.swap(false, Ordering::Relaxed) {
+        let _ = tx.send(TrackerEvent::IdleEnded);
+    }
+
+    false
+}
 
 #[derive(Default)]
 struct ForegroundObserverIvars {
@@ -80,6 +106,10 @@ fn emit_from_notification(tx: &Sender<TrackerEvent>, notification: &NSNotificati
             format!("pid:{}", pid)
         };
 
+        if handle_loginwindow(tx, &exe_name) {
+            return;
+        }
+
         let url: *mut NSObject = msg_send![app, bundleURL];
         let exe_path = if !url.is_null() {
             let path_obj: *mut NSObject = msg_send![url, path];
@@ -131,6 +161,10 @@ fn emit_current_foreground(tx: &Sender<TrackerEvent>) {
         } else {
             format!("pid:{}", pid)
         };
+
+        if handle_loginwindow(tx, &exe_name) {
+            return;
+        }
 
         let url: *mut NSObject = msg_send![app, bundleURL];
         let exe_path = if !url.is_null() {

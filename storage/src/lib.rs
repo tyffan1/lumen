@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -42,8 +42,14 @@ impl Storage {
         Ok(Self { conn, pending: Vec::new() })
     }
 
-    /// Кладёт сессию в буфер. Не трогает диск.
+    /// Кладёт сессию в буфер (автоматически разбивает через локальную полночь).
+    /// Не трогает диск.
     pub fn queue(&mut self, session: Session) {
+        self.pending.extend(split_session(&session));
+    }
+
+    /// То же, что queue(), но без разбивки по дням (для прямого импорта).
+    pub fn queue_raw(&mut self, session: Session) {
         self.pending.push(session);
     }
 
@@ -108,7 +114,8 @@ impl Storage {
     pub fn usage_by_day(&self, days: u32) -> Result<Vec<(String, i64)>> {
         let since = Utc::now() - chrono::Duration::days(days as i64);
         let mut stmt = self.conn.prepare(
-            "SELECT DATE(started_at, 'unixepoch') as day, SUM(ended_at - started_at) as total
+            "SELECT DATE(datetime(started_at, 'unixepoch', 'localtime')) as day,
+                    SUM(ended_at - started_at) as total
              FROM sessions
              WHERE started_at >= ?1
              GROUP BY day
@@ -121,4 +128,49 @@ impl Storage {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+}
+
+/// Разбивает сессию на фрагменты по границам локальной полуночи.
+/// Каждый фрагмент целиком лежит в одном локальном дне.
+fn split_session(session: &Session) -> Vec<Session> {
+    let mut result = Vec::new();
+    let mut cur = session.started_at;
+    let end = session.ended_at;
+
+    if cur >= end {
+        return result;
+    }
+
+    loop {
+        let local = cur.with_timezone(&Local);
+        let date = local.date_naive();
+        let next_local = date.succ_opt().expect("date overflow").and_hms_opt(0, 0, 0).expect("invalid midnight");
+        let next_midnight_local = Local
+            .from_local_datetime(&next_local)
+            .single()
+            .expect("local midnight should not be ambiguous");
+        let next = next_midnight_local.with_timezone(&Utc);
+
+        if next >= end {
+            result.push(Session {
+                exe_name: session.exe_name.clone(),
+                window_title: session.window_title.clone(),
+                started_at: cur,
+                ended_at: end,
+                was_fullscreen: session.was_fullscreen,
+            });
+            break;
+        }
+
+        result.push(Session {
+            exe_name: session.exe_name.clone(),
+            window_title: session.window_title.clone(),
+            started_at: cur,
+            ended_at: next,
+            was_fullscreen: session.was_fullscreen,
+        });
+        cur = next;
+    }
+
+    result
 }
